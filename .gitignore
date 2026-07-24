@@ -1,0 +1,32 @@
+# Виртуальное окружение
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Системные файлы macOS
+.DS_Store
+
+# Переменные окружения (содержат пароли!)
+.env
+
+# Рабочие папки с архивами и результатами
+original_archives/
+!original_archives/
+original_archives/*
+!original_archives/.gitkeep
+test_archives/
+
+# HTML-снапшоты для отладки
+*.html
+!web/templates/
+!web/templates/*.html
+
+# Лог переименований (генерируется автоматически)
+rename_log.txt
+llm_proposals.json
+
+# Собранные пакеты для переноса
+dist/
