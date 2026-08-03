@@ -6,10 +6,49 @@ from unittest.mock import Mock, patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from local_llm import LocalLlmError, request_side_proposal
+from local_llm import (
+    LocalLlmError,
+    request_side_proposal,
+    request_vision_side_proposal,
+)
 
 
 class LocalLlmTests(unittest.TestCase):
+    @patch("local_llm._image_data_url", return_value="data:image/jpeg;base64,AA==")
+    @patch("local_llm.requests.post")
+    def test_valid_vision_proposal_is_accepted(self, post, image_data):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"status":"proposal","assignments":['
+                            '{"order_id":"123","face":"a.tif","back":"b.tif"}],'
+                            '"confidence":0.95,"reason":"логотип и контакты"}'
+                        )
+                    }
+                }
+            ]
+        }
+        post.return_value = response
+
+        proposal = request_vision_side_proposal(
+            "archive.zip",
+            [Path("/tmp/a.tif"), Path("/tmp/b.tif")],
+            ["123"],
+        )
+
+        self.assertEqual(proposal.assignments[0].face, "a.tif")
+        self.assertEqual(proposal.confidence, 0.95)
+        self.assertEqual(image_data.call_count, 2)
+        user_content = post.call_args.kwargs["json"]["messages"][1]["content"]
+        self.assertEqual(
+            sum(item["type"] == "image_url" for item in user_content),
+            2,
+        )
+
     @patch("local_llm.requests.post")
     def test_valid_proposal_is_accepted(self, post):
         response = Mock()

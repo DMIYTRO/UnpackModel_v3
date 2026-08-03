@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 from dataclasses import dataclass
@@ -9,6 +11,12 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+
+try:
+    from PIL import Image, UnidentifiedImageError
+except ImportError:  # pragma: no cover - объясняется оператору при вызове
+    Image = None
+    UnidentifiedImageError = OSError
 
 
 class LocalLlmError(RuntimeError):
@@ -27,6 +35,11 @@ class LlmProposal:
     assignments: tuple[SideAssignment, ...]
     confidence: float
     reason: str
+
+
+VISION_EXTENSIONS = frozenset({".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
+VISION_MAX_DIMENSION = 1600
+VISION_MAX_PIXELS = 50_000_000
 
 
 def _extract_json_content(payload: dict) -> dict:
@@ -155,3 +168,128 @@ def request_side_proposal(
         raise LocalLlmError(f"Ошибка обращения к LM Studio: {exc}") from exc
 
     return _validate_proposal(_extract_json_content(payload), filenames, order_ids)
+
+
+def _image_data_url(path: Path) -> str:
+    """Готовит ограниченное JPEG-превью, не отправляя исходный TIFF целиком."""
+    if Image is None:
+        raise LocalLlmError(
+            "Для визуального анализа не установлена Pillow: "
+            "python -m pip install -r requirements.txt"
+        )
+    if path.suffix.casefold() not in VISION_EXTENSIONS:
+        raise LocalLlmError(
+            f"Визуальный анализ пока не поддерживает формат {path.suffix}: {path.name}"
+        )
+    try:
+        Image.MAX_IMAGE_PIXELS = VISION_MAX_PIXELS
+        with Image.open(path) as source:
+            source.load()
+            image = source.convert("RGB")
+            image.thumbnail((VISION_MAX_DIMENSION, VISION_MAX_DIMENSION))
+            stream = io.BytesIO()
+            image.save(stream, format="JPEG", quality=88, optimize=True)
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        raise LocalLlmError(
+            f"Не удалось подготовить изображение {path.name}: {exc}"
+        ) from exc
+    encoded = base64.b64encode(stream.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def request_vision_side_proposal(
+    archive_name: str,
+    files: list[Path],
+    order_ids: list[str],
+    *,
+    filenames: list[str] | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    timeout: int | None = None,
+) -> LlmProposal:
+    """Третий слой: определяет стороны по уменьшенным изображениям макетов."""
+    if len(files) != len(filenames or files):
+        raise LocalLlmError("Число файлов и отображаемых имён не совпадает")
+    shown_names = filenames or [path.name for path in files]
+    if len(files) != 2 or len(order_ids) != 1:
+        raise LocalLlmError(
+            "Визуальный слой принимает одну пару файлов одного заказа"
+        )
+
+    load_dotenv()
+    server = (
+        base_url
+        or os.getenv("LOCAL_LLM_BASE_URL")
+        or "http://127.0.0.1:1234/v1"
+    ).rstrip("/")
+    model_id = model or os.getenv("LOCAL_LLM_MODEL") or "google/gemma-4-e4b"
+    request_timeout = timeout or int(os.getenv("LOCAL_LLM_TIMEOUT", "90"))
+
+    instruction = {
+        "archive_name": archive_name,
+        "order_id": order_ids[0],
+        "task": (
+            "Определи лицо и оборот печатного макета по содержимому изображений. "
+            "Логотип/главная идентификация обычно являются лицом; адрес, телефон, "
+            "QR-код и подробные контакты обычно являются оборотом. Используй только "
+            "указанные имена. Если содержимого недостаточно, верни status=ambiguous."
+        ),
+        "response_schema": {
+            "status": "proposal or ambiguous",
+            "assignments": [
+                {
+                    "order_id": order_ids[0],
+                    "face": "точное имя файла",
+                    "back": "точное имя файла",
+                }
+            ],
+            "confidence": "number from 0 to 1",
+            "reason": "краткое объяснение на русском",
+        },
+    }
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": json.dumps(instruction, ensure_ascii=False),
+        }
+    ]
+    for name, path in zip(shown_names, files):
+        content.append({"type": "text", "text": f"Файл: {name}"})
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": _image_data_url(path)},
+            }
+        )
+
+    try:
+        response = requests.post(
+            f"{server}/chat/completions",
+            json={
+                "model": model_id,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты проверяешь стороны печатных макетов по изображениям. "
+                            "Верни только валидный JSON без Markdown."
+                        ),
+                    },
+                    {"role": "user", "content": content},
+                ],
+                "temperature": 0,
+                "max_tokens": 2000,
+                "stream": False,
+            },
+            timeout=request_timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise LocalLlmError(
+            f"Ошибка визуального обращения к LM Studio: {exc}"
+        ) from exc
+
+    return _validate_proposal(
+        _extract_json_content(payload), shown_names, order_ids
+    )

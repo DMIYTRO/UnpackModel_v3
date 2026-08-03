@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import time
+import unicodedata
 import uuid
 import zipfile
 from pathlib import Path
@@ -20,6 +21,7 @@ MAX_ARCHIVE_MEMBERS = 10_000
 MAX_COMPRESSION_RATIO = 200
 ZIP_UTF8_FLAG = 0x800
 CONFLICT_MARKER = ".conflict_pending"
+SOURCE_ARCHIVE_DIR = ".source_archive"
 STALE_TEMP_AGE_SECONDS = 24 * 60 * 60
 
 
@@ -27,7 +29,7 @@ class ArchiveLimitError(RuntimeError):
     """Архив превышает разрешённый размер."""
 
 
-class ArchiveSafetyError(RuntimeError):
+class ArchiveSafetyError(RuntimeError, ValueError):
     """Содержимое архива нельзя безопасно распаковать."""
 
 
@@ -106,7 +108,7 @@ def _validate_archive_member_names(names: list[str], archive_type: str) -> None:
             or normalized.startswith("../")
         ):
             raise ArchiveSafetyError(f"{archive_type} содержит небезопасный путь: {original_name}")
-        destination_key = normalized.casefold()
+        destination_key = unicodedata.normalize("NFC", normalized).casefold()
         if destination_key in destinations:
             raise ArchiveSafetyError(f"{archive_type} содержит повторяющийся путь: {original_name}")
         destinations.add(destination_key)
@@ -225,10 +227,54 @@ def _preflight_rar(tool: str, rar_file: Path) -> None:
     _check_archive_limits(members, "RAR")
 
 
+def _validate_extracted_tree(root: Path, archive_type: str = "Архив") -> None:
+    """Независимо проверяет результат внешней распаковки по данным файловой системы."""
+    member_count = 0
+    total_size = 0
+    destinations: set[str] = set()
+    pending = [root]
+
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                member_count += 1
+                if member_count > MAX_ARCHIVE_MEMBERS:
+                    raise ArchiveLimitError(
+                        f"{archive_type} фактически содержит слишком много элементов "
+                        f"(лимит {MAX_ARCHIVE_MEMBERS})"
+                    )
+
+                candidate = Path(entry.path)
+                relative_name = candidate.relative_to(root).as_posix()
+                destination_key = unicodedata.normalize("NFC", relative_name).casefold()
+                if destination_key in destinations:
+                    raise ArchiveSafetyError(
+                        f"{archive_type} после распаковки содержит конфликтующий путь: {relative_name}"
+                    )
+                destinations.add(destination_key)
+
+                mode = entry.stat(follow_symlinks=False).st_mode
+                if stat.S_ISLNK(mode):
+                    raise ArchiveSafetyError(f"{archive_type} содержит ссылку: {relative_name}")
+                if stat.S_ISDIR(mode):
+                    pending.append(candidate)
+                    continue
+                if not stat.S_ISREG(mode):
+                    raise ArchiveSafetyError(
+                        f"{archive_type} содержит специальный тип файла: {relative_name}"
+                    )
+
+                total_size += entry.stat(follow_symlinks=False).st_size
+                if total_size > MAX_EXTRACTED_SIZE_BYTES:
+                    raise ArchiveLimitError(
+                        f"Фактический распакованный размер {archive_type} превышает лимит 1,5 ГБ"
+                    )
+
+
 def _reject_extracted_links(root: Path) -> None:
-    for candidate in root.rglob("*"):
-        if candidate.is_symlink():
-            raise ArchiveSafetyError(f"Архив содержит ссылку: {candidate.relative_to(root)}")
+    """Обратная совместимость для прежнего внутреннего API."""
+    _validate_extracted_tree(root)
 
 
 def _legacy_name_score(value: str) -> int:
@@ -288,7 +334,6 @@ def decode_legacy_zip_name(filename: str, flag_bits: int) -> str:
 def _extract_zip_safely(zip_file: Path, extract_dir: Path):
     """Безопасно распаковывает ZIP и восстанавливает старые имена кириллицей."""
     root = extract_dir.resolve()
-    destinations: set[Path] = set()
     written_bytes = 0
     with zipfile.ZipFile(zip_file) as archive:
         archive_members = archive.infolist()
@@ -296,15 +341,18 @@ def _extract_zip_safely(zip_file: Path, extract_dir: Path):
             [(member.filename, member.file_size, member.compress_size) for member in archive_members],
             "ZIP",
         )
-        for member in archive_members:
-            member_name = decode_legacy_zip_name(member.filename, member.flag_bits)
-            member_name = member_name.replace("\\", "/")
+        decoded_members = [
+            (member, decode_legacy_zip_name(member.filename, member.flag_bits).replace("\\", "/"))
+            for member in archive_members
+        ]
+        # Вся проверка имён выполняется до создания первого файла: архив с
+        # коллизией не успеет частично перезаписать данные.
+        _validate_archive_member_names([name for _, name in decoded_members], "ZIP")
+
+        for member, member_name in decoded_members:
             destination = (root / member_name).resolve()
             if destination != root and root not in destination.parents:
                 raise ValueError(f"ZIP содержит небезопасный путь: {member_name}")
-            if destination in destinations:
-                raise ValueError(f"ZIP содержит повторяющийся путь: {member_name}")
-            destinations.add(destination)
 
             unix_mode = member.external_attr >> 16
             if stat.S_ISLNK(unix_mode):
@@ -320,6 +368,16 @@ def _extract_zip_safely(zip_file: Path, extract_dir: Path):
                     if written_bytes > MAX_EXTRACTED_SIZE_BYTES:
                         raise ArchiveLimitError("Фактический распакованный размер ZIP превышает лимит 1,5 ГБ")
                     target.write(chunk)
+    _validate_extracted_tree(root, "ZIP")
+
+
+def _move_source_archive_into_order(archive_file: Path, extract_dir: Path) -> Path:
+    """Сохраняет исходный архив рядом с распакованными файлами заказа."""
+    archive_dir = extract_dir / SOURCE_ARCHIVE_DIR
+    archive_dir.mkdir(exist_ok=True)
+    destination = _unique_path(archive_dir, archive_file.name)
+    shutil.move(str(archive_file), str(destination))
+    return destination
 
 
 def unpack_archives(source_dir: str, output_dir: str | None = None):
@@ -407,10 +465,23 @@ def unpack_archives(source_dir: str, output_dir: str | None = None):
                     stderr=subprocess.PIPE,
                     timeout=EXTRACT_TIMEOUT_SECONDS,
                 )
-                _reject_extracted_links(temp_dir)
+                _validate_extracted_tree(temp_dir, "RAR")
             # Публикуем результат только после успешной распаковки.
             temp_dir.replace(extract_dir)
             print("Успешно распаковано.")
+            try:
+                archived_source = _move_source_archive_into_order(
+                    archive_file, extract_dir
+                )
+                print(
+                    "Исходный архив сохранён в -> "
+                    f"{archived_source.relative_to(output_path)}"
+                )
+            except OSError as exc:
+                # Распаковка уже опубликована и корректна. Архив остаётся во
+                # входном каталоге: api_core перенесёт его при обработке либо
+                # вместе с папкой в ручную проверку.
+                print(f"⚠️ Не удалось вложить исходный архив: {exc}")
 
         except ArchiveLimitError as e:
             error_reason = str(e)

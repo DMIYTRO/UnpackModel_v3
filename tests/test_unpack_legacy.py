@@ -12,8 +12,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from unpack import (
     MAX_ARCHIVE_SIZE_BYTES,
+    ArchiveLimitError,
+    ArchiveSafetyError,
     _extract_zip_safely,
     _preflight_rar,
+    _validate_extracted_tree,
     _validate_archive_member_names,
     cleanup_stale_extracting_dirs,
     decode_legacy_zip_name,
@@ -108,6 +111,36 @@ class LegacyZipEncodingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "символическую ссылку"):
                 _extract_zip_safely(zip_path, output)
 
+    def test_case_insensitive_zip_collision_is_rejected_before_writing(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            zip_path = root / "collision.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr("Face.tif", b"first")
+                archive.writestr("face.tif", b"second")
+
+            output = root / "output"
+            output.mkdir()
+            with self.assertRaisesRegex(ArchiveSafetyError, "повторяющийся путь"):
+                _extract_zip_safely(zip_path, output)
+            self.assertEqual(list(output.iterdir()), [])
+
+    def test_unicode_normalization_zip_collision_is_rejected_before_writing(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            zip_path = root / "unicode-collision.zip"
+            composed = "макет-\N{LATIN SMALL LETTER E WITH ACUTE}.tif"
+            decomposed = "макет-e\N{COMBINING ACUTE ACCENT}.tif"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr(composed, b"first")
+                archive.writestr(decomposed, b"second")
+
+            output = root / "output"
+            output.mkdir()
+            with self.assertRaisesRegex(ArchiveSafetyError, "повторяющийся путь"):
+                _extract_zip_safely(zip_path, output)
+            self.assertEqual(list(output.iterdir()), [])
+
 
 class ArchiveLimitTests(unittest.TestCase):
     def test_zip_bomb_metadata_is_rejected_before_writing(self):
@@ -140,6 +173,44 @@ class ArchiveLimitTests(unittest.TestCase):
                 _preflight_rar("unrar", archive)
 
             self.assertEqual(run.call_args.args[0][:4], ["unrar", "lt", "-c-", "-p-"])
+
+    def test_extracted_tree_rejects_symbolic_link(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "target.tif").write_bytes(b"layout")
+            (root / "link.tif").symlink_to("target.tif")
+
+            with self.assertRaisesRegex(ArchiveSafetyError, "ссылку"):
+                _validate_extracted_tree(root, "RAR")
+
+    def test_extracted_tree_rejects_special_file(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            special = root / "pipe"
+            os.mkfifo(special)
+
+            with self.assertRaisesRegex(ArchiveSafetyError, "специальный тип"):
+                _validate_extracted_tree(root, "RAR")
+
+    def test_extracted_tree_checks_actual_member_count(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "one.tif").write_bytes(b"1")
+            (root / "two.tif").write_bytes(b"2")
+
+            with patch("unpack.MAX_ARCHIVE_MEMBERS", 1):
+                with self.assertRaisesRegex(ArchiveLimitError, "слишком много элементов"):
+                    _validate_extracted_tree(root, "RAR")
+
+    def test_extracted_tree_checks_actual_total_size(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "one.tif").write_bytes(b"123")
+            (root / "two.tif").write_bytes(b"456")
+
+            with patch("unpack.MAX_EXTRACTED_SIZE_BYTES", 5):
+                with self.assertRaisesRegex(ArchiveLimitError, "Фактический распакованный размер"):
+                    _validate_extracted_tree(root, "RAR")
 
     def test_old_extracting_folder_is_removed_but_fresh_one_is_kept(self):
         with TemporaryDirectory() as temp:

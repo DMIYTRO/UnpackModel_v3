@@ -13,9 +13,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from api_core import (
     AmbiguousSidesError,
     ApiCoreError,
+    _manual_reason_category,
+    _name_for_side,
     build_api_mapping,
+    files_per_suborder,
     process_archives_with_api,
 )
+from local_llm import LlmProposal, LocalLlmError, SideAssignment
 from website_parser import SiteAccessError
 
 
@@ -29,6 +33,15 @@ def pdf_bytes(page_count: int = 1) -> bytes:
 
 
 class ApiCoreTests(unittest.TestCase):
+    def test_llm_refusal_is_reported_as_ambiguous_sides(self):
+        self.assertEqual(
+            _manual_reason_category(
+                "Недостаточно информации для назначения конкретного файла "
+                "на лицевую или обратную сторону заказа"
+            ),
+            "спорные стороны",
+        )
+
     def test_two_sided_mapping_uses_suborder_and_face_back(self):
         with TemporaryDirectory() as temp:
             folder = Path(temp) / "job_4-4_(1-12345)_face"
@@ -112,8 +125,8 @@ class ApiCoreTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             folder = Path(temp) / "job_4-4_(1-12345)_face"
             folder.mkdir()
-            first = folder / "1.pdf"
-            second = folder / "2.pdf"
+            first = folder / "layout_12345.pdf"
+            second = folder / "layout_12346.pdf"
             first.write_bytes(pdf_bytes(page_count=2))
             second.write_bytes(pdf_bytes(page_count=2))
 
@@ -172,8 +185,8 @@ class ApiCoreTests(unittest.TestCase):
         with TemporaryDirectory() as temp:
             folder = Path(temp) / "job_4-0_(1-12345)_face"
             folder.mkdir()
-            first = folder / "1.pdf"
-            second = folder / "2.pdf"
+            first = folder / "layout_12345.pdf"
+            second = folder / "layout_12346.pdf"
             first.write_bytes(pdf_bytes(page_count=1))
             second.write_bytes(pdf_bytes(page_count=1))
 
@@ -182,6 +195,79 @@ class ApiCoreTests(unittest.TestCase):
             self.assertEqual(len(mapping), 2)
             self.assertIn("12345", mapping[0][1].name)
             self.assertIn("12346", mapping[1][1].name)
+
+    def test_multiple_orders_without_explicit_ids_use_sequential_grouping(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp) / "job_4-0_(1-12345)_face"
+            folder.mkdir()
+            first = folder / "version_1_size_90.pdf"
+            second = folder / "version_2_size_90.pdf"
+            first.write_bytes(pdf_bytes())
+            second.write_bytes(pdf_bytes())
+
+            mapping = build_api_mapping(
+                folder, [second, first], ["12345", "12346"]
+            )
+
+            self.assertEqual([source for source, _ in mapping], [first, second])
+            self.assertIn("12345", mapping[0][1].name)
+            self.assertIn("12346", mapping[1][1].name)
+
+    def test_strict_mode_requires_explicit_order_ids(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp) / "job_4-0_(1-12345)_face"
+            folder.mkdir()
+            first = folder / "version_1_size_90.pdf"
+            second = folder / "version_2_size_90.pdf"
+            first.write_bytes(pdf_bytes())
+            second.write_bytes(pdf_bytes())
+
+            with self.assertRaisesRegex(ApiCoreError, "полный номер заказа"):
+                build_api_mapping(
+                    folder,
+                    [first, second],
+                    ["12345", "12346"],
+                    strict_order_ids=True,
+                )
+
+    def test_zero_one_is_one_back_side(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp) / "job_0-1_(1-12345)_face"
+            folder.mkdir()
+            layout = folder / "layout.tif"
+            layout.write_bytes(b"back")
+
+            mapping = build_api_mapping(folder, [layout], ["90001"])
+
+            self.assertEqual(files_per_suborder(folder.name), 1)
+            self.assertEqual(
+                mapping[0][1].name,
+                "job_0-1_(1-90001)_back.tif",
+            )
+
+    def test_order_replacement_only_changes_structural_order_block(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp) / "12345_job_4-0_(1-12345)_face"
+            folder.mkdir()
+            layout = folder / "layout.tif"
+            layout.write_bytes(b"face")
+
+            mapping = build_api_mapping(folder, [layout], ["90001"])
+
+            self.assertEqual(
+                mapping[0][1].name,
+                "12345_job_4-0_(1-90001)_face_1.tif",
+            )
+
+    def test_side_marker_does_not_replace_part_of_word(self):
+        self.assertEqual(
+            _name_for_side("job_interface_1-face", "back"),
+            "job_interface_1-back",
+        )
+        self.assertEqual(
+            _name_for_side("job_backing", "face"),
+            "job_backing-face",
+        )
 
     @patch("api_core.unpack_archives")
     @patch("api_core.fetch_suborders", return_value=[])
@@ -201,7 +287,7 @@ class ApiCoreTests(unittest.TestCase):
             fetch.assert_called_once_with("12345", api_key="test-key", timeout=10)
 
     @patch("api_core.fetch_suborders", return_value=[])
-    def test_pipeline_finds_zip_and_moves_it_to_done(self, fetch):
+    def test_pipeline_finds_zip_and_keeps_it_inside_order_folder(self, fetch):
         with TemporaryDirectory() as temp:
             root = Path(temp)
             archive_name = "job_4-0_(1-12345)_face.zip"
@@ -213,7 +299,7 @@ class ApiCoreTests(unittest.TestCase):
             folder = root / "job_4-0_(1-12345)_face"
             self.assertTrue(summary.ok)
             self.assertTrue((folder / "job_4-0_(1-12345)_face_1.pdf").exists())
-            self.assertTrue((root / "_DONE_" / archive_name).exists())
+            self.assertTrue((folder / ".source_archive" / archive_name).exists())
             self.assertFalse((root / archive_name).exists())
 
     @patch("api_core.unpack_archives")
@@ -231,6 +317,153 @@ class ApiCoreTests(unittest.TestCase):
             self.assertFalse(summary.ok)
             self.assertTrue(layout.exists())
             self.assertFalse((folder / ".done").exists())
+
+    @patch("api_core.unpack_archives")
+    @patch("api_core.fetch_suborders", return_value=[])
+    def test_manual_summary_groups_count_mismatch_reason(self, fetch, unpack):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "job_4-4_(1-12345)_face"
+            folder.mkdir()
+            (folder / "layout.pdf").write_bytes(pdf_bytes(page_count=1))
+
+            summary = process_archives_with_api(root, api_key="test-key")
+
+            self.assertEqual(
+                summary.manual_reason_counts,
+                {"несовпадение количества/страниц": 1},
+            )
+            self.assertTrue(
+                (root / "_REQUIRES_MANUAL_CHECK_" / folder.name).exists()
+            )
+
+    def test_sequential_groups_send_each_ambiguous_pair_to_local_llm(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "job_4-4_(1-12345)_face"
+            folder.mkdir()
+            for name in ("1-a.tif", "1-b.tif", "2-a.tif", "2-b.tif"):
+                (folder / name).write_bytes(b"layout")
+
+            proposals = [
+                LlmProposal(
+                    assignments=(
+                        SideAssignment(
+                            order_id="12345",
+                            face="1-a.tif",
+                            back="1-b.tif",
+                        ),
+                    ),
+                    confidence=0.9,
+                    reason="первая пара",
+                ),
+                LlmProposal(
+                    assignments=(
+                        SideAssignment(
+                            order_id="12346",
+                            face="2-a.tif",
+                            back="2-b.tif",
+                        ),
+                    ),
+                    confidence=0.9,
+                    reason="вторая пара",
+                ),
+            ]
+            with (
+                patch("api_core.unpack_archives"),
+                patch("api_core.fetch_suborders", return_value=["12346"]),
+                patch(
+                    "api_core.request_side_proposal", side_effect=proposals
+                ) as request,
+            ):
+                summary = process_archives_with_api(
+                    root,
+                    api_key="test-key",
+                    use_local_llm=True,
+                    confirm_llm=lambda *_: True,
+                )
+
+            self.assertTrue(summary.ok)
+            self.assertEqual(request.call_count, 2)
+            self.assertTrue(
+                (folder / "job_4-4_(1-12345)_face.tif").exists()
+            )
+            self.assertTrue(
+                (folder / "job_4-4_(1-12346)_back.tif").exists()
+            )
+
+    def test_visual_layer_is_used_after_filename_llm_refuses(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "job_4-4_(1-12345)_face"
+            folder.mkdir()
+            first = folder / "a.tif"
+            second = folder / "b.tif"
+            first.write_bytes(b"a")
+            second.write_bytes(b"b")
+            visual = LlmProposal(
+                assignments=(
+                    SideAssignment(
+                        order_id="12345",
+                        face="a.tif",
+                        back="b.tif",
+                    ),
+                ),
+                confidence=0.95,
+                reason="логотип и контакты",
+            )
+
+            with (
+                patch("api_core.unpack_archives"),
+                patch("api_core.fetch_suborders", return_value=[]),
+                patch(
+                    "api_core.request_side_proposal",
+                    side_effect=LocalLlmError("имён недостаточно"),
+                ),
+                patch(
+                    "api_core.request_vision_side_proposal",
+                    return_value=visual,
+                ) as vision,
+            ):
+                summary = process_archives_with_api(
+                    root,
+                    api_key="test-key",
+                    use_local_llm=True,
+                    confirm_llm=lambda *_: True,
+                )
+
+            self.assertTrue(summary.ok)
+            vision.assert_called_once()
+            self.assertTrue((folder / "job_4-4_(1-12345)_face.tif").exists())
+
+    def test_interrupted_archive_move_is_resumed_without_second_rename(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "job_4-0_(1-12345)_face"
+            folder.mkdir()
+            (folder / "layout.pdf").write_bytes(pdf_bytes())
+
+            with (
+                patch("api_core.unpack_archives"),
+                patch("api_core.fetch_suborders", return_value=[]) as fetch,
+                patch("api_core._archive_source", side_effect=OSError("NAS offline")),
+            ):
+                first = process_archives_with_api(root, api_key="test-key")
+
+            self.assertFalse(first.ok)
+            self.assertFalse((folder / ".done").exists())
+            self.assertTrue((folder / "job_4-0_(1-12345)_face_1.pdf").exists())
+
+            with (
+                patch("api_core.unpack_archives"),
+                patch("api_core.fetch_suborders") as second_fetch,
+            ):
+                second = process_archives_with_api(root, api_key="test-key")
+
+            self.assertTrue(second.ok)
+            self.assertTrue((folder / ".done").exists())
+            second_fetch.assert_not_called()
+            fetch.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -43,16 +44,20 @@ def parse_suborders_response(response_text: str) -> list[str]:
         preview = response_text.strip().replace("\n", " ")[:160]
         raise OrderDataError(f"API вернул неожиданный ответ: {preview!r}")
 
-    # Убираем дубликаты и сохраняем числовой порядок подзаказов.
-    return sorted(set(items), key=int)
+    # Порядок ответа является частью контракта: по нему комплекты соотносятся
+    # с подзаказами. Удаляем повторы, не переставляя элементы.
+    return list(dict.fromkeys(items))
 
 
 def fetch_suborders(
     order_number: str,
     api_key: str | None = None,
     timeout: int = 10,
+    *,
+    retries: int = 2,
+    backoff: float = 0.5,
 ) -> list[str]:
-    """Получает подзаказы через единственный запрос ``getSubOrders``."""
+    """Получает подзаказы, повторяя только временные сетевые ошибки."""
     order_number = _validate_order_number(order_number)
     load_dotenv()
     key = api_key or os.getenv("SBORKA_API_KEY")
@@ -60,16 +65,30 @@ def fetch_suborders(
         raise SiteAccessError("В .env не задан SBORKA_API_KEY")
 
     print(f"    🌐 Сайт: отправляю запрос getSubOrders для заказа {order_number}")
-    try:
-        response = requests.post(
-            API_URL,
-            params={"action": "getSubOrders", "id": order_number},
-            data={"api_key": key},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise SiteAccessError(f"Ошибка запроса к API sborka.ua: {exc}") from exc
+    response = None
+    for attempt in range(retries + 1):
+        try:
+            response = requests.post(
+                API_URL,
+                params={"action": "getSubOrders", "id": order_number},
+                data={"api_key": key},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            break
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            retryable = status is None or status == 429 or (
+                status is not None and 500 <= status < 600
+            )
+            if attempt >= retries or not retryable:
+                raise SiteAccessError(
+                    f"Ошибка запроса к API sborka.ua после {attempt + 1} попыток: {exc}"
+                ) from exc
+            time.sleep(backoff * (2**attempt))
+
+    if response is None:  # pragma: no cover — защитный инвариант
+        raise SiteAccessError("API sborka.ua не вернул ответ")
 
     suborders = parse_suborders_response(response.text)
     shown = ", ".join(suborders) if suborders else "нет"

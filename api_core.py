@@ -5,7 +5,8 @@
 2. найти номер основного заказа в имени распакованной папки;
 3. получить подзаказы запросом ``action=getSubOrders`` и добавить основной заказ;
 4. проверить количество макетов и атомарно переименовать их;
-5. переместить исходный архив в ``_DONE_`` либо папку заказа в ручную проверку.
+5. сохранить исходный архив в папке заказа и при необходимости перенести весь
+   заказ в ручную проверку.
 """
 
 from __future__ import annotations
@@ -22,15 +23,27 @@ from atomic_rename import atomic_rename_many
 from classifier import classify_face_back_paths
 from file_discovery import list_layout_files
 from filename_parser import parse_filename
-from local_llm import LlmProposal, LocalLlmError, request_side_proposal
+from local_llm import (
+    LlmProposal,
+    LocalLlmError,
+    request_side_proposal,
+    request_vision_side_proposal,
+)
+from operational_state import (
+    LockHeldError,
+    OrderStage,
+    OrderStateStore,
+    run_lock,
+    unique_path,
+)
 from pdf_pages import PdfPageCountError, count_layout_units
-from unpack import unpack_archives
+from unpack import SOURCE_ARCHIVE_DIR, unpack_archives
 from website_parser import OrderDataError, SiteAccessError, fetch_suborders
 
 
 DONE_MARKER = ".done"
+STATE_FILE = ".processing_state.json"
 CONFLICT_MARKER = ".conflict_pending"
-DONE_DIR = "_DONE_"
 MANUAL_CHECK_DIR = "_REQUIRES_MANUAL_CHECK_"
 
 
@@ -51,12 +64,56 @@ class AmbiguousSidesError(ApiCoreError):
 class ProcessingSummary:
     processed: list[str] = field(default_factory=list)
     manual_check: list[str] = field(default_factory=list)
+    manual_reason_counts: dict[str, int] = field(default_factory=dict)
     skipped: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not self.failures
+
+    def add_manual(self, folder_name: str, reason: str) -> None:
+        self.manual_check.append(f"{folder_name}: {reason}")
+        category = _manual_reason_category(reason)
+        self.manual_reason_counts[category] = (
+            self.manual_reason_counts.get(category, 0) + 1
+        )
+
+
+def _manual_reason_category(reason: str) -> str:
+    """Сворачивает технические сообщения в понятные оператору категории."""
+    lowered = reason.casefold()
+    if "номер" in lowered and "заказ" in lowered:
+        return "нет номера заказа"
+    if any(
+        marker in lowered
+        for marker in (
+            "лицо и оборот",
+            "лицев",
+            "оборотн",
+            "обратн",
+            "face",
+            "back",
+            "назначения сторон",
+            "локальная llm",
+            "lm studio",
+            "оператор не подтвердил",
+        )
+    ):
+        return "спорные стороны"
+    if any(
+        marker in lowered
+        for marker in (
+            "количество",
+            "страниц",
+            "сторон",
+            "комплект",
+            "не хватает печатной",
+            "сгруппировать макеты",
+        )
+    ):
+        return "несовпадение количества/страниц"
+    return "другая причина"
 
 
 def _network_mount_root(path: Path) -> Path | None:
@@ -88,12 +145,16 @@ def files_per_suborder(folder_name: str) -> int:
     sides = parse_filename(folder_name).get("sides")
     if not sides:
         raise ApiCoreError(f"В имени папки нет сторонности X-Y: {folder_name}")
-    _, back_side = sides.split("-", maxsplit=1)
-    return 2 if int(back_side) > 0 else 1
+    front_side, back_side = (int(value) for value in sides.split("-", maxsplit=1))
+    if front_side == 0 and back_side == 0:
+        raise ApiCoreError(f"Сторонность 0-0 не содержит печатных сторон: {folder_name}")
+    return int(front_side > 0) + int(back_side > 0)
 
 
 def _name_for_side(base_name: str, side: str) -> str:
-    pattern = r"([_-]?)(\d*)-?(face|back)"
+    # Маркер должен быть самостоятельным сегментом. В частности, не меняем
+    # ``interface`` и ``backing``.
+    pattern = r"(?<![A-Za-z])([_-]?)(\d*)-?(face|back)(?![A-Za-z])"
 
     def replace_side(match: re.Match) -> str:
         prefix, number = match.group(1), match.group(2)
@@ -104,20 +165,73 @@ def _name_for_side(base_name: str, side: str) -> str:
     return f"{base_name}-{side}"
 
 
+def _replace_order_number(folder_name: str, old: str, new: str) -> str:
+    """Заменяет только номер заказа во второй позиции блока ``(N-ORDER)``."""
+    pattern = re.compile(rf"(\(\d+-){re.escape(old)}(\))")
+    replaced, count = pattern.subn(rf"\g<1>{new}\g<2>", folder_name, count=1)
+    if count != 1:
+        raise ApiCoreError(
+            f"Не удалось однозначно заменить номер заказа {old} в {folder_name}"
+        )
+    return replaced
+
+
+def _mentioned_order_ids(path: Path, order_ids: list[str]) -> list[str]:
+    """Находит только полные числовые токены заказа в имени файла."""
+    text = path.name
+    return [
+        order_id
+        for order_id in order_ids
+        if re.search(rf"(?<!\d){re.escape(order_id)}(?!\d)", text)
+    ]
+
+
 def _layout_sort_key(path: Path) -> tuple[int, int, str]:
+    """Естественный порядок комплектов: первое число, затем полное имя."""
     match = re.search(r"\d+", path.name)
     if match:
-        return 0, int(match.group()), path.name.casefold()
-    return 1, 0, path.name.casefold()
+        return 0, int(match.group()), path.as_posix().casefold()
+    return 1, 0, path.as_posix().casefold()
+
+
+def _has_explicit_order_mapping(files: list[Path], order_ids: list[str]) -> bool:
+    return bool(files) and all(
+        len(_mentioned_order_ids(path, order_ids)) == 1 for path in files
+    )
 
 
 def _group_files_by_order(
     files: list[Path],
     page_details: dict[Path, int],
-    order_count: int,
+    order_ids: list[str],
     sides_per_order: int,
+    *,
+    strict_order_ids: bool = False,
 ) -> list[list[Path]]:
     """Группирует файлы по заказам, считая страницы PDF печатными сторонами."""
+    order_count = len(order_ids)
+    if order_count > 1 and _has_explicit_order_mapping(files, order_ids):
+        by_order: dict[str, list[Path]] = {order_id: [] for order_id in order_ids}
+        for path in sorted(files, key=lambda item: item.as_posix().casefold()):
+            mentioned = _mentioned_order_ids(path, order_ids)
+            by_order[mentioned[0]].append(path)
+        groups = []
+        for order_id in order_ids:
+            group = by_order[order_id]
+            units = sum(page_details[path] for path in group)
+            if units != sides_per_order:
+                raise ApiCoreError(
+                    f"Заказ {order_id}: найдено {units} печатных сторон, "
+                    f"ожидалось {sides_per_order}"
+                )
+            groups.append(group)
+        return groups
+    if order_count > 1 and strict_order_ids:
+        raise ApiCoreError(
+            "Для нескольких заказов не во всех именах файлов указан ровно "
+            "один полный номер заказа"
+        )
+
     groups = []
     current = []
     current_sides = 0
@@ -154,6 +268,7 @@ def build_api_mapping(
     order_ids: list[str],
     *,
     llm_proposal: LlmProposal | None = None,
+    strict_order_ids: bool = False,
 ) -> list[tuple[Path, Path]]:
     """Строит полную карту переименования и отклоняет неполные совпадения."""
     order_number = parse_filename(folder.name).get("order_number")
@@ -165,7 +280,11 @@ def build_api_mapping(
     per_suborder = files_per_suborder(folder.name)
     page_details = count_layout_units(files)[1]
     groups = _group_files_by_order(
-        files, page_details, len(order_ids), per_suborder
+        files,
+        page_details,
+        order_ids,
+        per_suborder,
+        strict_order_ids=strict_order_ids,
     )
 
     proposed = {}
@@ -177,12 +296,14 @@ def build_api_mapping(
                 by_name[assignment.back],
             ]
     operations: list[tuple[Path, Path]] = []
+    side_scheme = parse_filename(folder.name)["sides"]
+    back_only = side_scheme is not None and side_scheme.startswith("0-")
     for order_index, suborder in enumerate(order_ids):
         batch = groups[order_index]
         is_container = (
             len(batch) == 1 and page_details[batch[0]] == per_suborder
         )
-        base_name = folder.name.replace(order_number, suborder)
+        base_name = _replace_order_number(folder.name, order_number, suborder)
 
         if per_suborder == 2 and not is_container:
             if suborder in proposed:
@@ -199,13 +320,14 @@ def build_api_mapping(
                 batch = [classified["face"], classified["back"]]
 
         for side_index, source in enumerate(batch):
-            if is_container:
+            if back_only:
+                new_name = _name_for_side(base_name, "back") + source.suffix
+            elif is_container:
                 new_name = f"{base_name}_{order_index + 1}{source.suffix}"
             elif per_suborder == 2:
                 side = "face" if side_index == 0 else "back"
                 new_name = _name_for_side(base_name, side) + source.suffix
             else:
-                # Сохраняем действующее правило для односторонних подзаказов.
                 new_name = f"{base_name}_{order_index + 1}{source.suffix}"
             operations.append((source, source.with_name(new_name)))
 
@@ -228,21 +350,65 @@ def _unique_destination(directory: Path, filename: str) -> Path:
     if not destination.exists():
         return destination
     source = Path(filename)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return directory / f"{source.stem}_{timestamp}{source.suffix}"
+    return unique_path(directory, prefix=f"{source.stem}_", suffix=source.suffix)
 
 
-def _mark_done(folder: Path, source_dir: Path) -> None:
-    (folder / DONE_MARKER).write_text(
+def _archive_source(folder: Path, source_dir: Path) -> Path | None:
+    """Возвращает архив из папки заказа, мигрируя результат старого запуска."""
+    embedded_dir = folder / SOURCE_ARCHIVE_DIR
+    embedded = sorted(
+        (
+            path
+            for path in embedded_dir.iterdir()
+            if path.is_file() and path.suffix.casefold() in {".rar", ".zip"}
+        ),
+        key=lambda path: path.name.casefold(),
+    ) if embedded_dir.is_dir() else []
+    if len(embedded) > 1:
+        raise ApiCoreError(
+            f"В папке {folder.name} найдено несколько исходных архивов"
+        )
+    if embedded:
+        return embedded[0]
+
+    archive = _find_source_archive(source_dir, folder.name)
+    if archive is None:
+        return None
+    embedded_dir.mkdir(exist_ok=True)
+    destination = _unique_destination(embedded_dir, archive.name)
+    shutil.move(str(archive), str(destination))
+    return destination
+
+
+def _write_done_marker(folder: Path) -> None:
+    marker = folder / DONE_MARKER
+    temporary = unique_path(folder, prefix=f"{DONE_MARKER}.", suffix=".tmp")
+    temporary.write_text(
         f"Обработано через API: {datetime.now().isoformat(timespec='seconds')}\n",
         encoding="utf-8",
     )
-    archive = _find_source_archive(source_dir, folder.name)
-    if archive is None:
-        return
-    done_dir = source_dir / DONE_DIR
-    done_dir.mkdir(exist_ok=True)
-    shutil.move(str(archive), str(_unique_destination(done_dir, archive.name)))
+    os.replace(temporary, marker)
+
+
+def _finish_renamed_order(
+    folder: Path,
+    source_dir: Path,
+    state_store: OrderStateStore,
+) -> None:
+    """Завершает архивирование; безопасно вызывается после прерванного запуска."""
+    state = state_store.load()
+    if state is None:
+        raise ApiCoreError(f"Не найдено состояние обработки: {folder.name}")
+    if state.stage == OrderStage.RENAMED:
+        archived = _archive_source(folder, source_dir)
+        state_store.transition(
+            OrderStage.ARCHIVED,
+            details={"archived_to": str(archived) if archived else None},
+        )
+        state = state_store.load()
+    if state is not None and state.stage == OrderStage.ARCHIVED:
+        _write_done_marker(folder)
+        state_store.transition(OrderStage.DONE)
 
 
 def _write_rename_log(
@@ -267,6 +433,17 @@ def _move_to_manual_check(
     manual_dir = output_dir / MANUAL_CHECK_DIR
     manual_dir.mkdir(exist_ok=True)
     destination = _unique_destination(manual_dir, folder.name)
+    archive = _find_source_archive(source_dir, folder.name)
+    if archive is not None:
+        _archive_source(folder, source_dir)
+
+    print("    📋 План ручной проверки:")
+    print(f"       Категория: {_manual_reason_category(reason)}")
+    print(f"       Причина: {reason}")
+    print(f"       Папка: {folder}  →  {destination}")
+    if archive is not None:
+        print(f"       Архив сохранён внутри папки заказа")
+
     shutil.move(str(folder), str(destination))
     (destination / "_PROBLEM.txt").write_text(
         f"Дата: {datetime.now().isoformat(timespec='seconds')}\n"
@@ -274,14 +451,6 @@ def _move_to_manual_check(
         f"Причина: {reason}\n",
         encoding="utf-8",
     )
-    archive = _find_source_archive(source_dir, folder.name)
-    if archive is not None:
-        archive_manual_dir = source_dir / MANUAL_CHECK_DIR
-        archive_manual_dir.mkdir(exist_ok=True)
-        shutil.move(
-            str(archive),
-            str(_unique_destination(archive_manual_dir, archive.name)),
-        )
 
 
 def process_archives_with_api(
@@ -292,6 +461,8 @@ def process_archives_with_api(
     timeout: int = 10,
     use_local_llm: bool = False,
     confirm_llm=None,
+    break_stale_lock: bool = False,
+    strict_order_ids: bool = False,
 ) -> ProcessingSummary:
     """Распаковывает и обрабатывает все заказы в указанных каталогах."""
     source_path = Path(source_dir).expanduser().resolve()
@@ -300,113 +471,183 @@ def process_archives_with_api(
     if output_path != source_path:
         _prepare_directory(output_path, "Выходной каталог")
 
-    unpack_archives(str(source_path), str(output_path))
+    try:
+        process_lock = run_lock(source_path, stale_after=24 * 60 * 60).acquire(
+            break_stale=break_stale_lock
+        )
+    except LockHeldError as exc:
+        raise ApiCoreError(str(exc)) from exc
+
     summary = ProcessingSummary()
+    try:
+        unpack_archives(str(source_path), str(output_path))
 
-    for folder in sorted(output_path.iterdir(), key=lambda item: item.name.casefold()):
-        if not folder.is_dir() or folder.name.startswith(("_", ".")):
-            continue
-        if (folder / DONE_MARKER).exists():
-            summary.skipped.append(folder.name)
-            continue
-        if (folder / CONFLICT_MARKER).exists():
-            summary.skipped.append(folder.name)
-            continue
-
-        print(f"\n[API] Обработка: {folder.name}")
-        order_number = parse_filename(folder.name).get("order_number")
-        if not order_number:
-            reason = "В имени папки не найден номер основного заказа"
-            _move_to_manual_check(folder, source_path, output_path, reason)
-            summary.manual_check.append(f"{folder.name}: {reason}")
-            continue
-
-        try:
-            suborders = fetch_suborders(order_number, api_key=api_key, timeout=timeout)
-            # getSubOrders возвращает только дочерние номера. Основной заказ
-            # соответствует первому комплекту макетов и добавляется отдельно.
-            order_ids = [order_number]
-            order_ids.extend(item for item in suborders if item != order_number)
-            print(f"    🌐 Итоговый список заказов: {', '.join(order_ids)}")
-            files = list_layout_files(folder)
-            print(f"    📄 Найдено файлов макетов: {len(files)}")
-            layout_units, page_details = count_layout_units(files)
-            for path, pages in page_details.items():
-                if path.suffix.casefold() == ".pdf":
-                    print(
-                        f"       PDF {path.relative_to(folder)}: "
-                        f"{pages} стр."
-                    )
-            print(f"    📄 Всего печатных страниц/сторон: {layout_units}")
-            proposal = None
-            collected_assignments = []
-            proposal_confidences = []
-            proposal_reasons = []
-            while True:
+        for folder in sorted(output_path.iterdir(), key=lambda item: item.name.casefold()):
+            if not folder.is_dir() or folder.name.startswith(("_", ".")):
+                continue
+            state_store = OrderStateStore(folder / STATE_FILE)
+            state = state_store.load()
+            if (folder / DONE_MARKER).exists() or (
+                state is not None and state.stage == OrderStage.DONE
+            ):
+                summary.skipped.append(folder.name)
+                continue
+            if state is not None and state.stage in {
+                OrderStage.RENAMED,
+                OrderStage.ARCHIVED,
+            }:
                 try:
-                    operations = build_api_mapping(
-                        folder, files, order_ids, llm_proposal=proposal
-                    )
-                    break
-                except AmbiguousSidesError as ambiguity:
-                    print(f"    ❓ Спорный случай: {ambiguity}")
-                    if not use_local_llm:
-                        raise ApiCoreError(
-                            f"{ambiguity}; локальная LLM не включена"
-                        ) from ambiguity
-                    relative_files = [
-                        str(path.relative_to(folder)) for path in ambiguity.files
-                    ]
+                    _finish_renamed_order(folder, source_path, state_store)
+                    summary.processed.append(folder.name)
+                except Exception as exc:
+                    summary.failures.append(f"{folder.name}: восстановление: {exc}")
+                continue
+            if (folder / CONFLICT_MARKER).exists():
+                summary.skipped.append(folder.name)
+                continue
+
+            print(f"\n[API] Обработка: {folder.name}")
+            order_number = parse_filename(folder.name).get("order_number")
+            if not order_number:
+                reason = "В имени папки не найден номер основного заказа"
+                _move_to_manual_check(folder, source_path, output_path, reason)
+                summary.add_manual(folder.name, reason)
+                continue
+
+            try:
+                suborders = fetch_suborders(
+                    order_number, api_key=api_key, timeout=timeout
+                )
+                order_ids = [order_number]
+                order_ids.extend(item for item in suborders if item != order_number)
+                print(f"    🌐 Итоговый список заказов: {', '.join(order_ids)}")
+                files = list_layout_files(folder)
+                print(f"    📄 Найдено файлов макетов: {len(files)}")
+                layout_units, page_details = count_layout_units(files)
+                for path, pages in page_details.items():
+                    if path.suffix.casefold() == ".pdf":
+                        print(f"       PDF {path.relative_to(folder)}: {pages} стр.")
+                print(f"    📄 Всего печатных страниц/сторон: {layout_units}")
+                if (
+                    len(order_ids) > 1
+                    and not _has_explicit_order_mapping(files, order_ids)
+                    and not strict_order_ids
+                ):
                     print(
-                        f"    🤖 LM Studio, заказ {ambiguity.order_id}: "
-                        f"{', '.join(relative_files)}"
-                    )
-                    partial = request_side_proposal(
-                        folder.name, relative_files, [ambiguity.order_id]
-                    )
-                    print(
-                        f"    🤖 LM Studio: уверенность {partial.confidence:.0%}; "
-                        f"{partial.reason or 'объяснение не указано'}"
-                    )
-                    collected_assignments.extend(partial.assignments)
-                    proposal_confidences.append(partial.confidence)
-                    if partial.reason:
-                        proposal_reasons.append(partial.reason)
-                    proposal = LlmProposal(
-                        assignments=tuple(collected_assignments),
-                        confidence=min(proposal_confidences),
-                        reason="; ".join(proposal_reasons),
+                        "    🧭 Номера подзаказов есть не во всех именах; "
+                        "использую последовательную группировку файлов"
                     )
 
-            if proposal is not None:
-                print("    📝 Предлагаемый план переименования:")
+                proposal = None
+                collected_assignments = []
+                proposal_confidences = []
+                proposal_reasons = []
+                while True:
+                    try:
+                        operations = build_api_mapping(
+                            folder,
+                            files,
+                            order_ids,
+                            llm_proposal=proposal,
+                            strict_order_ids=strict_order_ids,
+                        )
+                        break
+                    except AmbiguousSidesError as ambiguity:
+                        print(f"    ❓ Спорный случай: {ambiguity}")
+                        if not use_local_llm:
+                            raise ApiCoreError(
+                                f"{ambiguity}; локальная LLM не включена"
+                            ) from ambiguity
+                        relative_files = [
+                            str(path.relative_to(folder)) for path in ambiguity.files
+                        ]
+                        try:
+                            print("    🤖 Слой 2: анализ имён файлов")
+                            partial = request_side_proposal(
+                                folder.name,
+                                relative_files,
+                                [ambiguity.order_id],
+                            )
+                        except LocalLlmError as text_error:
+                            print(
+                                "    👁 Слой 3: имена не дали ответа; "
+                                "анализирую изображения"
+                            )
+                            try:
+                                partial = request_vision_side_proposal(
+                                    folder.name,
+                                    ambiguity.files,
+                                    [ambiguity.order_id],
+                                    filenames=relative_files,
+                                )
+                            except LocalLlmError as vision_error:
+                                raise LocalLlmError(
+                                    f"анализ имён: {text_error}; "
+                                    f"анализ изображений: {vision_error}"
+                                ) from vision_error
+                        collected_assignments.extend(partial.assignments)
+                        proposal_confidences.append(partial.confidence)
+                        if partial.reason:
+                            proposal_reasons.append(partial.reason)
+                        proposal = LlmProposal(
+                            assignments=tuple(collected_assignments),
+                            confidence=min(proposal_confidences),
+                            reason="; ".join(proposal_reasons),
+                        )
+
+                if proposal is not None:
+                    print("    📝 Предлагаемый план переименования:")
+                    for source, destination in operations:
+                        print(f"       {source.name}  →  {destination.name}")
+                    confirmer = confirm_llm or _confirm_llm_proposal
+                    if not confirmer(folder, proposal, operations):
+                        raise ApiCoreError(
+                            "оператор не подтвердил предложение LM Studio"
+                        )
+
+                print("    🔄 План переименования:")
                 for source, destination in operations:
                     print(f"       {source.name}  →  {destination.name}")
-                confirmer = confirm_llm or _confirm_llm_proposal
-                if not confirmer(folder, proposal, operations):
-                    raise ApiCoreError("оператор не подтвердил предложение LM Studio")
-                print("    ✅ Оператор подтвердил предложение")
-
-            print("    🔄 План переименования:")
-            for source, destination in operations:
-                print(f"       {source.name}  →  {destination.name}")
-            atomic_rename_many(operations)
-            _write_rename_log(folder, operations, output_path / "rename_log.txt")
-            _mark_done(folder, source_path)
-            summary.processed.append(folder.name)
-            for old_path, new_path in operations:
-                print(f"    {old_path.name} -> {new_path.name}")
-        except SiteAccessError as exc:
-            # Сетевые ошибки должны оставлять заказ на месте для безопасного повтора.
-            summary.failures.append(f"{folder.name}: {exc}")
-            print(f"    ❌ {exc}")
-        except (ApiCoreError, OrderDataError, LocalLlmError, PdfPageCountError) as exc:
-            _move_to_manual_check(folder, source_path, output_path, str(exc))
-            summary.manual_check.append(f"{folder.name}: {exc}")
-            print(f"    ⚠️ Ручная проверка: {exc}")
-        except Exception as exc:
-            summary.failures.append(f"{folder.name}: {exc}")
-            print(f"    ❌ Непредвиденная ошибка: {exc}")
+                if state is None:
+                    state_store.prepare(
+                        order_number,
+                        details={
+                            "operations": [
+                                {
+                                    "source": str(source.relative_to(folder)),
+                                    "destination": str(
+                                        destination.relative_to(folder)
+                                    ),
+                                }
+                                for source, destination in operations
+                            ]
+                        },
+                    )
+                atomic_rename_many(operations)
+                state_store.transition(OrderStage.RENAMED)
+                try:
+                    _write_rename_log(
+                        folder, operations, output_path / "rename_log.txt"
+                    )
+                except OSError as exc:
+                    print(f"    ⚠️ Не удалось записать журнал переименований: {exc}")
+                _finish_renamed_order(folder, source_path, state_store)
+                summary.processed.append(folder.name)
+                for old_path, new_path in operations:
+                    print(f"    {old_path.name} -> {new_path.name}")
+            except SiteAccessError as exc:
+                # Сетевые ошибки оставляют заказ на месте для безопасного повтора.
+                summary.failures.append(f"{folder.name}: {exc}")
+                print(f"    ❌ {exc}")
+            except (ApiCoreError, OrderDataError, LocalLlmError, PdfPageCountError) as exc:
+                _move_to_manual_check(folder, source_path, output_path, str(exc))
+                summary.add_manual(folder.name, str(exc))
+                print(f"    ⚠️ Ручная проверка: {exc}")
+            except Exception as exc:
+                summary.failures.append(f"{folder.name}: {exc}")
+                print(f"    ❌ Непредвиденная ошибка: {exc}")
+    finally:
+        process_lock.release()
 
     return summary
 
@@ -438,6 +679,19 @@ def main() -> int:
         action="store_true",
         help="спрашивать LM Studio о спорных двухсторонних заказах",
     )
+    parser.add_argument(
+        "--break-stale-lock",
+        action="store_true",
+        help="снять блокировку старше 24 часов и продолжить обработку",
+    )
+    parser.add_argument(
+        "--strict-order-ids",
+        action="store_true",
+        help=(
+            "для нескольких подзаказов запретить последовательную группировку "
+            "и требовать номер заказа в каждом имени"
+        ),
+    )
     args = parser.parse_args()
 
     summary = process_archives_with_api(
@@ -445,6 +699,8 @@ def main() -> int:
         args.output_dir,
         timeout=args.timeout,
         use_local_llm=args.use_local_llm,
+        break_stale_lock=args.break_stale_lock,
+        strict_order_ids=args.strict_order_ids,
     )
     print(
         "\nИтог: "
@@ -453,6 +709,10 @@ def main() -> int:
         f"пропущено={len(summary.skipped)}, "
         f"ошибки={len(summary.failures)}"
     )
+    if summary.manual_reason_counts:
+        print("Причины ручной проверки:")
+        for reason, count in summary.manual_reason_counts.items():
+            print(f"  {reason}: {count}")
     return 0 if summary.ok else 2
 
 
