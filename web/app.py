@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
 import os
-import secrets
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from PIL import Image
@@ -39,27 +37,7 @@ def create_app(service: WebPipelineService | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
 
     @app.middleware("http")
-    async def require_login(request: Request, call_next):
-        password = os.getenv("UNPACK_WEB_PASSWORD") or os.getenv("ADMIN_PASSWORD")
-        username = os.getenv("UNPACK_WEB_USERNAME") or os.getenv("LOGIN_USER") or "admin"
-        if password and request.url.path != "/api/health":
-            supplied_user = supplied_password = ""
-            authorization = request.headers.get("authorization", "")
-            if authorization.startswith("Basic "):
-                try:
-                    decoded = base64.b64decode(authorization[6:]).decode("utf-8")
-                    supplied_user, supplied_password = decoded.split(":", 1)
-                except (ValueError, UnicodeDecodeError):
-                    pass
-            if not (
-                secrets.compare_digest(supplied_user, username)
-                and secrets.compare_digest(supplied_password, password)
-            ):
-                return JSONResponse(
-                    {"detail": "Требуется вход"},
-                    status_code=401,
-                    headers={"WWW-Authenticate": 'Basic realm="UnpackModel"'},
-                )
+    async def security_headers(request: Request, call_next):
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -175,7 +153,4 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
     host = os.getenv("UNPACK_WEB_HOST", "127.0.0.1")
-    password = os.getenv("UNPACK_WEB_PASSWORD") or os.getenv("ADMIN_PASSWORD")
-    if host not in {"127.0.0.1", "localhost", "::1"} and not password:
-        raise SystemExit("Для сетевого запуска задайте UNPACK_WEB_PASSWORD или ADMIN_PASSWORD")
     uvicorn.run(app, host=host, port=int(os.getenv("UNPACK_WEB_PORT", "8016")))
