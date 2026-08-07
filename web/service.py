@@ -23,6 +23,7 @@ from filename_parser import parse_filename
 from local_llm import (
     LlmProposal,
     LocalLlmError,
+    SideAssignment,
     request_side_proposal,
     request_vision_side_proposal,
 )
@@ -156,13 +157,15 @@ class WebPipelineService:
             try:
                 suborders = fetch_suborders(order_number)
                 order_ids = [order_number, *(item for item in suborders if item != order_number)]
-                operations, used_llm = self._mapping_with_optional_llm(
+                operations, used_llm, llm_warning = self._mapping_with_optional_llm(
                     folder,
                     files,
                     order_ids,
                     use_local_llm=run["use_local_llm"],
                     strict_order_ids=run["strict_order_ids"],
                 )
+                if llm_warning:
+                    reason, status = llm_warning, "needs_attention"
             except Exception as exc:
                 reason, status = str(exc), "needs_attention"
         proposed = {str(source.relative_to(folder)): destination.name for source, destination in operations}
@@ -249,23 +252,29 @@ class WebPipelineService:
         *,
         use_local_llm: bool,
         strict_order_ids: bool,
-    ) -> tuple[list[tuple[Path, Path]], bool]:
+    ) -> tuple[list[tuple[Path, Path]], bool, str]:
         proposal = None
         assignments = []
         confidences = []
         reasons = []
+        unresolved_files: set[str] = set()
+        warnings: list[str] = []
         while True:
             try:
-                return (
-                    build_api_mapping(
-                        folder,
-                        files,
-                        order_ids,
-                        llm_proposal=proposal,
-                        strict_order_ids=strict_order_ids,
-                    ),
-                    proposal is not None,
+                operations = build_api_mapping(
+                    folder,
+                    files,
+                    order_ids,
+                    llm_proposal=proposal,
+                    strict_order_ids=strict_order_ids,
                 )
+                if unresolved_files:
+                    operations = [
+                        pair
+                        for pair in operations
+                        if str(pair[0].relative_to(folder)) not in unresolved_files
+                    ]
+                return operations, proposal is not None, "; ".join(warnings)
             except AmbiguousSidesError as ambiguity:
                 if not use_local_llm:
                     raise ApiCoreError(
@@ -277,12 +286,30 @@ class WebPipelineService:
                         folder.name, relative, [ambiguity.order_id]
                     )
                 except LocalLlmError:
-                    partial = request_vision_side_proposal(
-                        folder.name,
-                        ambiguity.files,
-                        [ambiguity.order_id],
-                        filenames=relative,
-                    )
+                    try:
+                        partial = request_vision_side_proposal(
+                            folder.name,
+                            ambiguity.files,
+                            [ambiguity.order_id],
+                            filenames=relative,
+                        )
+                    except LocalLlmError as exc:
+                        # Добавляем техническую перестановку только для перехода
+                        # к следующим подзаказам. Эти файлы отфильтровываются из
+                        # итогового плана и остаются пустыми для ручного ввода.
+                        unresolved_files.update(relative)
+                        warnings.append(f"Заказ {ambiguity.order_id}: {exc}")
+                        partial = LlmProposal(
+                            assignments=(
+                                SideAssignment(
+                                    order_id=ambiguity.order_id,
+                                    face=relative[0],
+                                    back=relative[1],
+                                ),
+                            ),
+                            confidence=0,
+                            reason="",
+                        )
                 assignments.extend(partial.assignments)
                 confidences.append(partial.confidence)
                 if partial.reason:

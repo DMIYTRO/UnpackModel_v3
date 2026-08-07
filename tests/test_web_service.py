@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from local_llm import LlmProposal, LocalLlmError, SideAssignment
 from web.service import WebPipelineService, WebServiceError
 
 
@@ -53,7 +54,7 @@ class WebPipelineServiceTests(unittest.TestCase):
             with (
                 patch("web.service.unpack_archives"),
                 patch("web.service.fetch_suborders", return_value=[]),
-                patch.object(service, "_mapping_with_optional_llm", return_value=(proposed, True)),
+                patch.object(service, "_mapping_with_optional_llm", return_value=(proposed, True, "")),
             ):
                 created = service.start({"source_dir": str(root), "output_dir": str(root)})
                 run = self.wait_for_analysis(service, created["id"])
@@ -64,6 +65,34 @@ class WebPipelineServiceTests(unittest.TestCase):
             self.assertEqual(order["proposal_source"], "llm")
             self.assertTrue(face.exists())
             self.assertTrue(back.exists())
+
+    def test_partial_llm_plan_keeps_resolved_pair_and_leaves_failed_pair_blank(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary) / "job_4-4_(1-12345)_face"
+            folder.mkdir()
+            files = [folder / name for name in ("a.tif", "b.tif", "c.tif", "d.tif")]
+            for path in files:
+                path.write_bytes(b"layout")
+            first = LlmProposal(
+                assignments=(SideAssignment("12345", "a.tif", "b.tif"),),
+                confidence=0.8,
+                reason="первая пара распознана",
+            )
+            with (
+                patch("web.service.request_side_proposal", side_effect=[first, LocalLlmError("имена неясны")]),
+                patch("web.service.request_vision_side_proposal", side_effect=LocalLlmError("стороны не определены")),
+            ):
+                operations, used_llm, warning = WebPipelineService._mapping_with_optional_llm(
+                    folder.resolve(),
+                    [path.resolve() for path in files],
+                    ["12345", "12346"],
+                    use_local_llm=True,
+                    strict_order_ids=False,
+                )
+
+            self.assertTrue(used_llm)
+            self.assertIn("12346", warning)
+            self.assertEqual({source.name for source, _ in operations}, {"a.tif", "b.tif"})
 
     def test_custom_name_cannot_change_extension(self):
         with self.assertRaises(WebServiceError):
