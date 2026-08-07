@@ -232,7 +232,12 @@ class WebPipelineService:
 
     def list_runs(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [self.public_run(run) for run in reversed(list(self.state["runs"].values()))]
+            runs = sorted(
+                self.state["runs"].values(),
+                key=lambda run: run.get("created_at", ""),
+                reverse=True,
+            )
+            return [self.public_run(run) for run in runs]
 
     def get(self, run_id: str) -> dict[str, Any]:
         try:

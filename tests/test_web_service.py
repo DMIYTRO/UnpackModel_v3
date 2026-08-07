@@ -62,6 +62,17 @@ class WebPipelineServiceTests(unittest.TestCase):
             self.assertTrue(run["use_local_llm"])
             self.assertTrue(run["strict_order_ids"])
 
+    def test_runs_are_listed_by_creation_time_not_random_id_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            service = WebPipelineService(root / "state.json", (root,))
+            service.state["runs"] = {
+                "z-old": {"id": "z-old", "created_at": "2026-01-01T00:00:00", "orders": {}},
+                "a-new": {"id": "a-new", "created_at": "2026-02-01T00:00:00", "orders": {}},
+            }
+            with patch.object(service, "public_run", side_effect=lambda run: run):
+                self.assertEqual([run["id"] for run in service.list_runs()], ["a-new", "z-old"])
+
 
 if __name__ == "__main__":
     unittest.main()
