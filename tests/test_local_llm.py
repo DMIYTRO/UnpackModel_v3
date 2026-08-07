@@ -72,6 +72,10 @@ class LocalLlmTests(unittest.TestCase):
         response_format = post.call_args.kwargs["json"]["response_format"]
         self.assertEqual(response_format["type"], "json_schema")
         self.assertTrue(response_format["json_schema"]["strict"])
+        properties = response_format["json_schema"]["schema"]["properties"]
+        assignment = properties["assignments"]["items"]["properties"]
+        self.assertEqual(assignment["order_id"]["enum"], ["123"])
+        self.assertEqual(assignment["face"]["enum"], ["a.tif", "b.tif"])
 
     @patch("local_llm.requests.post")
     def test_valid_proposal_is_accepted(self, post):

@@ -47,7 +47,7 @@ VISION_MAX_DIMENSION = 1600
 VISION_MAX_PIXELS = 50_000_000
 
 
-def _response_format() -> dict:
+def _response_format(filenames: list[str], order_ids: list[str]) -> dict:
     """Строгая схема ответа для поддерживаемого Ollama JSON mode."""
     return {
         "type": "json_schema",
@@ -63,9 +63,9 @@ def _response_format() -> dict:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "order_id": {"type": "string"},
-                                "face": {"type": "string"},
-                                "back": {"type": "string"},
+                                "order_id": {"type": "string", "enum": order_ids},
+                                "face": {"type": "string", "enum": filenames},
+                                "back": {"type": "string", "enum": filenames},
                             },
                             "required": ["order_id", "face", "back"],
                             "additionalProperties": False,
@@ -198,7 +198,7 @@ def request_side_proposal(
                 "temperature": 0,
                 "max_tokens": 1200,
                 "stream": False,
-                "response_format": _response_format(),
+                "response_format": _response_format(filenames, order_ids),
             },
             timeout=request_timeout,
         )
@@ -356,7 +356,7 @@ def request_vision_side_proposal(
                 "temperature": 0,
                 "max_tokens": 2000,
                 "stream": False,
-                "response_format": _response_format(),
+                "response_format": _response_format(shown_names, order_ids),
             },
             timeout=request_timeout,
         )

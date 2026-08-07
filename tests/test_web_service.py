@@ -16,7 +16,7 @@ class WebPipelineServiceTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("analysis did not finish")
 
-    def test_analysis_waits_for_approval_then_renames(self):
+    def test_rule_based_analysis_renames_automatically(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             folder = root / "job_4-0_(1-12345)_face"
@@ -27,14 +27,43 @@ class WebPipelineServiceTests(unittest.TestCase):
             with patch("web.service.unpack_archives"), patch("web.service.fetch_suborders", return_value=[]):
                 created = service.start({"source_dir": str(root), "output_dir": str(root)})
                 run = self.wait_for_analysis(service, created["id"])
-            self.assertEqual(run["status"], "awaiting_decisions")
-            self.assertTrue(source.exists())
+            self.assertEqual(run["status"], "completed")
+            self.assertFalse(source.exists())
             order = next(iter(run["orders"].values()))
             item = order["items"][0]
-            service.approve(created["id"], order["order_id"], {item["file_id"]: item["proposed_name"]})
-            self.assertFalse(source.exists())
+            self.assertEqual(order["status"], "completed")
+            self.assertEqual(order["proposal_source"], "rules")
             self.assertTrue((folder / item["proposed_name"]).exists())
             self.assertTrue((folder / ".done").exists())
+
+    def test_llm_proposal_still_waits_for_operator_approval(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder = root / "job_4-4_(1-12345)_face"
+            folder.mkdir()
+            face = folder / "a.tif"
+            back = folder / "b.tif"
+            face.write_bytes(b"face")
+            back.write_bytes(b"back")
+            proposed = [
+                (face.resolve(), folder.resolve() / "job_4-4_(1-12345)_face.tif"),
+                (back.resolve(), folder.resolve() / "job_4-4_(1-12345)_back.tif"),
+            ]
+            service = WebPipelineService(root / "state.json", (root,))
+            with (
+                patch("web.service.unpack_archives"),
+                patch("web.service.fetch_suborders", return_value=[]),
+                patch.object(service, "_mapping_with_optional_llm", return_value=(proposed, True)),
+            ):
+                created = service.start({"source_dir": str(root), "output_dir": str(root)})
+                run = self.wait_for_analysis(service, created["id"])
+
+            order = next(iter(run["orders"].values()))
+            self.assertEqual(run["status"], "awaiting_decisions")
+            self.assertEqual(order["status"], "awaiting_decision")
+            self.assertEqual(order["proposal_source"], "llm")
+            self.assertTrue(face.exists())
+            self.assertTrue(back.exists())
 
     def test_custom_name_cannot_change_extension(self):
         with self.assertRaises(WebServiceError):

@@ -147,6 +147,7 @@ class WebPipelineService:
         files = list_layout_files(folder)
         order_number = parse_filename(folder.name).get("order_number")
         operations = []
+        used_llm = False
         reason = ""
         status = "awaiting_decision"
         if not order_number:
@@ -155,7 +156,7 @@ class WebPipelineService:
             try:
                 suborders = fetch_suborders(order_number)
                 order_ids = [order_number, *(item for item in suborders if item != order_number)]
-                operations = self._mapping_with_optional_llm(
+                operations, used_llm = self._mapping_with_optional_llm(
                     folder,
                     files,
                     order_ids,
@@ -178,8 +179,67 @@ class WebPipelineService:
                 "mtime_ns": stat.st_mtime_ns,
             })
         key = uuid4().hex
-        run["orders"][key] = {"order_id": key, "folder_name": folder.name, "folder_path": str(folder), "status": status, "reason": reason, "items": items, "created_at": _now()}
-        self._event(run, "order.waiting", f"{folder.name}: ожидает решения", order_id=key)
+        order = {
+            "order_id": key,
+            "folder_name": folder.name,
+            "folder_path": str(folder),
+            "status": status,
+            "reason": reason,
+            "proposal_source": "llm" if used_llm else "rules",
+            "items": items,
+            "created_at": _now(),
+        }
+        run["orders"][key] = order
+        if status == "awaiting_decision" and not used_llm:
+            try:
+                self._apply_automatic_order(run, order, operations)
+            except Exception as exc:
+                order["status"] = "needs_attention"
+                order["reason"] = f"Не удалось применить автоматическое переименование: {exc}"
+                self._event(run, "order.failed", f"{folder.name}: {order['reason']}", order_id=key)
+        else:
+            self._event(run, "order.waiting", f"{folder.name}: ожидает решения", order_id=key)
+
+    def _apply_automatic_order(
+        self,
+        run: dict[str, Any],
+        order: dict[str, Any],
+        operations: list[tuple[Path, Path]],
+    ) -> None:
+        folder = Path(order["folder_path"])
+        order["status"] = "applying"
+        self._event(
+            run,
+            "order.auto_applying",
+            f"Автоматическое переименование: {order['folder_name']}",
+            order_id=order["order_id"],
+        )
+        with order_lock(folder):
+            store = OrderStateStore(folder / STATE_FILE)
+            if store.load() is None:
+                store.prepare(
+                    order["order_id"],
+                    details={
+                        "operations": [
+                            {
+                                "source": str(source.relative_to(folder)),
+                                "destination": str(destination.relative_to(folder)),
+                            }
+                            for source, destination in operations
+                        ],
+                        "proposal_source": "rules",
+                    },
+                )
+            atomic_rename_many(operations)
+            store.transition(OrderStage.RENAMED)
+            _finish_renamed_order(folder, Path(run["source_dir"]), store)
+        order["status"] = "completed"
+        self._event(
+            run,
+            "order.auto_completed",
+            f"Автоматически готово: {order['folder_name']}",
+            order_id=order["order_id"],
+        )
 
     @staticmethod
     def _mapping_with_optional_llm(
@@ -189,19 +249,22 @@ class WebPipelineService:
         *,
         use_local_llm: bool,
         strict_order_ids: bool,
-    ) -> list[tuple[Path, Path]]:
+    ) -> tuple[list[tuple[Path, Path]], bool]:
         proposal = None
         assignments = []
         confidences = []
         reasons = []
         while True:
             try:
-                return build_api_mapping(
-                    folder,
-                    files,
-                    order_ids,
-                    llm_proposal=proposal,
-                    strict_order_ids=strict_order_ids,
+                return (
+                    build_api_mapping(
+                        folder,
+                        files,
+                        order_ids,
+                        llm_proposal=proposal,
+                        strict_order_ids=strict_order_ids,
+                    ),
+                    proposal is not None,
                 )
             except AmbiguousSidesError as ambiguity:
                 if not use_local_llm:
