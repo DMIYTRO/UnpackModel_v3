@@ -47,6 +47,40 @@ VISION_MAX_DIMENSION = 1600
 VISION_MAX_PIXELS = 50_000_000
 
 
+def _response_format() -> dict:
+    """Строгая схема ответа для поддерживаемого Ollama JSON mode."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "side_proposal",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["proposal", "ambiguous"]},
+                    "assignments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "order_id": {"type": "string"},
+                                "face": {"type": "string"},
+                                "back": {"type": "string"},
+                            },
+                            "required": ["order_id", "face", "back"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "reason": {"type": "string"},
+                },
+                "required": ["status", "assignments", "confidence", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _extract_json_content(payload: dict) -> dict:
     try:
         content = payload["choices"][0]["message"]["content"]
@@ -164,6 +198,7 @@ def request_side_proposal(
                 "temperature": 0,
                 "max_tokens": 1200,
                 "stream": False,
+                "response_format": _response_format(),
             },
             timeout=request_timeout,
         )
@@ -321,6 +356,7 @@ def request_vision_side_proposal(
                 "temperature": 0,
                 "max_tokens": 2000,
                 "stream": False,
+                "response_format": _response_format(),
             },
             timeout=request_timeout,
         )

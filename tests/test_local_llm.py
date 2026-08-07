@@ -69,6 +69,9 @@ class LocalLlmTests(unittest.TestCase):
             sum(item["type"] == "image_url" for item in user_content),
             2,
         )
+        response_format = post.call_args.kwargs["json"]["response_format"]
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertTrue(response_format["json_schema"]["strict"])
 
     @patch("local_llm.requests.post")
     def test_valid_proposal_is_accepted(self, post):
