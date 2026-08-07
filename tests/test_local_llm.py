@@ -73,6 +73,8 @@ class LocalLlmTests(unittest.TestCase):
         self.assertEqual(response_format["type"], "json_schema")
         self.assertTrue(response_format["json_schema"]["strict"])
         properties = response_format["json_schema"]["schema"]["properties"]
+        self.assertEqual(properties["assignments"]["minItems"], 1)
+        self.assertEqual(properties["assignments"]["maxItems"], 1)
         assignment = properties["assignments"]["items"]["properties"]
         self.assertEqual(assignment["order_id"]["enum"], ["123"])
         self.assertEqual(assignment["face"]["enum"], ["a.tif", "b.tif"])

@@ -60,6 +60,8 @@ def _response_format(filenames: list[str], order_ids: list[str]) -> dict:
                     "status": {"type": "string", "enum": ["proposal", "ambiguous"]},
                     "assignments": {
                         "type": "array",
+                        "minItems": len(order_ids),
+                        "maxItems": len(order_ids),
                         "items": {
                             "type": "object",
                             "properties": {
