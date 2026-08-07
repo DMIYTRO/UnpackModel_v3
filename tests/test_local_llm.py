@@ -1,19 +1,40 @@
+import base64
+import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+from PIL import Image
+from pypdf import PdfWriter
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from local_llm import (
     LocalLlmError,
+    _image_data_url,
     request_side_proposal,
     request_vision_side_proposal,
 )
 
 
 class LocalLlmTests(unittest.TestCase):
+    def test_pdf_first_page_is_converted_to_bounded_jpeg(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "layout.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=2000, height=1000)
+            with path.open("wb") as stream:
+                writer.write(stream)
+
+            data_url = _image_data_url(path)
+            encoded = data_url.removeprefix("data:image/jpeg;base64,")
+            with Image.open(io.BytesIO(base64.b64decode(encoded))) as image:
+                self.assertEqual(image.format, "JPEG")
+                self.assertLessEqual(max(image.size), 1600)
+
     @patch("local_llm._image_data_url", return_value="data:image/jpeg;base64,AA==")
     @patch("local_llm.requests.post")
     def test_valid_vision_proposal_is_accepted(self, post, image_data):

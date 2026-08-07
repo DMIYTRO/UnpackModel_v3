@@ -18,6 +18,11 @@ except ImportError:  # pragma: no cover - объясняется операто�
     Image = None
     UnidentifiedImageError = OSError
 
+try:
+    import pypdfium2 as pdfium
+except ImportError:  # pragma: no cover - объясняется оператору при вызове
+    pdfium = None
+
 
 class LocalLlmError(RuntimeError):
     """Локальная модель недоступна или вернула небезопасный ответ."""
@@ -37,7 +42,7 @@ class LlmProposal:
     reason: str
 
 
-VISION_EXTENSIONS = frozenset({".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
+VISION_EXTENSIONS = frozenset({".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp", ".pdf"})
 VISION_MAX_DIMENSION = 1600
 VISION_MAX_PIXELS = 50_000_000
 
@@ -170,8 +175,39 @@ def request_side_proposal(
     return _validate_proposal(_extract_json_content(payload), filenames, order_ids)
 
 
+def _visual_image(path: Path):
+    """Открывает изображение или растеризует первую страницу PDF."""
+    if path.suffix.casefold() != ".pdf":
+        with Image.open(path) as source:
+            source.load()
+            return source.convert("RGB")
+    if pdfium is None:
+        raise LocalLlmError(
+            "Для визуального анализа PDF не установлена pypdfium2: "
+            "python -m pip install -r requirements.txt"
+        )
+    document = pdfium.PdfDocument(path)
+    try:
+        if len(document) < 1:
+            raise LocalLlmError(f"PDF не содержит страниц: {path.name}")
+        page = document[0]
+        try:
+            width, height = page.get_size()
+            longest = max(float(width), float(height), 1.0)
+            scale = min(2.5, VISION_MAX_DIMENSION / longest)
+            bitmap = page.render(scale=scale)
+            try:
+                return bitmap.to_pil().convert("RGB").copy()
+            finally:
+                bitmap.close()
+        finally:
+            page.close()
+    finally:
+        document.close()
+
+
 def _image_data_url(path: Path) -> str:
-    """Готовит ограниченное JPEG-превью, не отправляя исходный TIFF целиком."""
+    """Готовит ограниченное JPEG-превью для визуальной модели."""
     if Image is None:
         raise LocalLlmError(
             "Для визуального анализа не установлена Pillow: "
@@ -183,13 +219,13 @@ def _image_data_url(path: Path) -> str:
         )
     try:
         Image.MAX_IMAGE_PIXELS = VISION_MAX_PIXELS
-        with Image.open(path) as source:
-            source.load()
-            image = source.convert("RGB")
+        with _visual_image(path) as image:
             image.thumbnail((VISION_MAX_DIMENSION, VISION_MAX_DIMENSION))
             stream = io.BytesIO()
             image.save(stream, format="JPEG", quality=88, optimize=True)
-    except (OSError, ValueError, UnidentifiedImageError) as exc:
+    except LocalLlmError:
+        raise
+    except (OSError, ValueError, UnidentifiedImageError, RuntimeError) as exc:
         raise LocalLlmError(
             f"Не удалось подготовить изображение {path.name}: {exc}"
         ) from exc
