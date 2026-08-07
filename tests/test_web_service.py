@@ -46,6 +46,22 @@ class WebPipelineServiceTests(unittest.TestCase):
             with self.assertRaises(WebServiceError):
                 service.start({"source_dir": outside})
 
+    def test_legacy_web_flags_are_not_shadowed_by_false_canonical_defaults(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            service = WebPipelineService(root / "state.json", (root,))
+            with patch("web.service.threading.Thread.start"):
+                created = service.start({
+                    "source_dir": str(root),
+                    "use_local_llm": False,
+                    "use_llm": True,
+                    "strict_order_ids": False,
+                    "strict": True,
+                })
+            run = service.get(created["id"])
+            self.assertTrue(run["use_local_llm"])
+            self.assertTrue(run["strict_order_ids"])
+
 
 if __name__ == "__main__":
     unittest.main()

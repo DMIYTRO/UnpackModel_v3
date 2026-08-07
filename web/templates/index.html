@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>UnpackModel — операторская панель</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v=2">
 </head>
 <body>
   <header class="topbar">
@@ -43,6 +43,7 @@
 
   <dialog id="order-dialog">
     <form method="dialog" class="dialog-head"><div><p class="eyebrow">ПРОВЕРКА ИМЁН</p><h2 id="dialog-title">Заказ</h2></div><button class="icon" aria-label="Закрыть">×</button></form>
+    <p id="order-reason" class="order-reason" hidden></p>
     <div id="files" class="files"></div>
     <div class="dialog-actions">
       <button id="approve" class="primary" type="button">Подтвердить</button>
@@ -52,6 +53,6 @@
     <p id="dialog-error" class="error" role="alert"></p>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=2" defer></script>
 </body>
 </html>

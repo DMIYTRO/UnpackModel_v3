@@ -62,6 +62,17 @@ class WebPipelineService:
             if run["status"] in {"queued", "scanning", "analyzing"}:
                 run["status"] = "interrupted"
                 run["error"] = "Сервис был перезапущен во время анализа"
+            for order in run.get("orders", {}).values():
+                for item in order.get("items", []):
+                    if "proposal_available" in item:
+                        continue
+                    available = bool(item.get("proposed_name")) and (
+                        not order.get("reason")
+                        or item.get("proposed_name") != item.get("original_name")
+                    )
+                    item["proposal_available"] = available
+                    if not available:
+                        item["proposed_name"] = ""
         self._save()
 
     def _save(self) -> None:
@@ -90,14 +101,15 @@ class WebPipelineService:
             run = {
                 "id": run_id, "status": "queued", "stage": "В очереди", "progress": 0,
                 "source_dir": str(source), "output_dir": str(output),
-                "use_local_llm": bool(options.get("use_local_llm", options.get("use_llm", False))),
-                "strict_order_ids": bool(options.get("strict_order_ids", options.get("strict", False))),
+                "use_local_llm": bool(options.get("use_local_llm") or options.get("use_llm")),
+                "strict_order_ids": bool(options.get("strict_order_ids") or options.get("strict")),
                 "created_at": _now(), "updated_at": _now(), "error": None,
                 "events": [], "orders": {},
             }
             self.state["runs"][run_id] = run
             self._cancel[run_id] = threading.Event()
-            self._event(run, "run.queued", "Запуск поставлен в очередь")
+            llm_state = "включена" if run["use_local_llm"] else "выключена"
+            self._event(run, "run.queued", f"Запуск поставлен в очередь; LLM {llm_state}")
             threading.Thread(target=self._analyze, args=(run_id,), daemon=True).start()
             return self.public_run(run)
 
@@ -160,7 +172,9 @@ class WebPipelineService:
             file_id = uuid4().hex
             items.append({
                 "file_id": file_id, "relative_path": relative, "original_name": path.name,
-                "proposed_name": proposed.get(relative, path.name), "size": stat.st_size,
+                "proposed_name": proposed.get(relative, ""),
+                "proposal_available": relative in proposed,
+                "size": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns,
             })
         key = uuid4().hex
