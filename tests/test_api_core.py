@@ -107,6 +107,29 @@ class ApiCoreTests(unittest.TestCase):
             self.assertTrue(alpha.exists())
             self.assertTrue(beta.exists())
 
+    def test_numbered_pairs_map_first_side_to_face_and_second_to_back(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp) / "job_1-1_(1-12345)_face"
+            folder.mkdir()
+            files = []
+            for group in range(1, 9):
+                nested = folder / "8 шт проба"
+                nested.mkdir(exist_ok=True)
+                for side in (1, 2):
+                    path = nested / f"{group}_{side}.jpeg"
+                    path.write_bytes(b"image")
+                    files.append(path)
+
+            order_ids = [str(90000 + index) for index in range(1, 9)]
+            mapping = build_api_mapping(folder, list(reversed(files)), order_ids)
+
+            self.assertEqual(len(mapping), 16)
+            for index, order_id in enumerate(order_ids, start=1):
+                pair = mapping[(index - 1) * 2:index * 2]
+                self.assertEqual([source.name for source, _ in pair], [f"{index}_1.jpeg", f"{index}_2.jpeg"])
+                self.assertIn(f"(1-{order_id})_face.jpeg", pair[0][1].name)
+                self.assertIn(f"(1-{order_id})_back.jpeg", pair[1][1].name)
+
     def test_two_page_pdf_is_one_valid_two_sided_order(self):
         with TemporaryDirectory() as temp:
             folder = Path(temp) / "job_4-4_(1-12345)_face"

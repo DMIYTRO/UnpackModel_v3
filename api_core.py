@@ -200,6 +200,26 @@ def _has_explicit_order_mapping(files: list[Path], order_ids: list[str]) -> bool
     )
 
 
+def _classify_numbered_side_pair(files: list[Path]) -> dict[str, Path | None]:
+    """Recognize ``N_1`` as face and ``N_2`` as back for one layout pair."""
+    matched: dict[str, Path] = {}
+    group_number: str | None = None
+    for path in files:
+        match = re.fullmatch(r"(\d+)[_-]([12])", path.stem)
+        if match is None:
+            return {"face": None, "back": None}
+        current_group, side_number = match.groups()
+        if group_number is None:
+            group_number = current_group
+        elif current_group != group_number:
+            return {"face": None, "back": None}
+        side = "face" if side_number == "1" else "back"
+        if side in matched:
+            return {"face": None, "back": None}
+        matched[side] = path
+    return {"face": matched.get("face"), "back": matched.get("back")}
+
+
 def _group_files_by_order(
     files: list[Path],
     page_details: dict[Path, int],
@@ -310,6 +330,8 @@ def build_api_mapping(
                 batch = proposed[suborder]
             else:
                 classified = classify_face_back_paths(batch)
+                if classified["face"] is None or classified["back"] is None:
+                    classified = _classify_numbered_side_pair(batch)
                 if classified["face"] is None or classified["back"] is None:
                     names = ", ".join(path.name for path in batch)
                     raise AmbiguousSidesError(
