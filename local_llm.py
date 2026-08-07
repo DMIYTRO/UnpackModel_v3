@@ -49,6 +49,34 @@ VISION_MAX_PIXELS = 50_000_000
 
 def _response_format(filenames: list[str], order_ids: list[str]) -> dict:
     """Строгая схема ответа для поддерживаемого Ollama JSON mode."""
+    generic_assignment = {
+        "type": "object",
+        "properties": {
+            "order_id": {"type": "string", "enum": order_ids},
+            "face": {"type": "string", "enum": filenames},
+            "back": {"type": "string", "enum": filenames},
+        },
+        "required": ["order_id", "face", "back"],
+        "additionalProperties": False,
+    }
+    if len(order_ids) == 1 and len(filenames) == 2:
+        assignment_schema = {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "order_id": {"const": order_ids[0]},
+                        "face": {"const": face},
+                        "back": {"const": back},
+                    },
+                    "required": ["order_id", "face", "back"],
+                    "additionalProperties": False,
+                }
+                for face, back in (filenames, list(reversed(filenames)))
+            ]
+        }
+    else:
+        assignment_schema = generic_assignment
     return {
         "type": "json_schema",
         "json_schema": {
@@ -62,16 +90,7 @@ def _response_format(filenames: list[str], order_ids: list[str]) -> dict:
                         "type": "array",
                         "minItems": len(order_ids),
                         "maxItems": len(order_ids),
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "order_id": {"type": "string", "enum": order_ids},
-                                "face": {"type": "string", "enum": filenames},
-                                "back": {"type": "string", "enum": filenames},
-                            },
-                            "required": ["order_id", "face", "back"],
-                            "additionalProperties": False,
-                        },
+                        "items": assignment_schema,
                     },
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "reason": {"type": "string"},

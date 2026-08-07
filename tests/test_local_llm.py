@@ -75,9 +75,12 @@ class LocalLlmTests(unittest.TestCase):
         properties = response_format["json_schema"]["schema"]["properties"]
         self.assertEqual(properties["assignments"]["minItems"], 1)
         self.assertEqual(properties["assignments"]["maxItems"], 1)
-        assignment = properties["assignments"]["items"]["properties"]
-        self.assertEqual(assignment["order_id"]["enum"], ["123"])
-        self.assertEqual(assignment["face"]["enum"], ["a.tif", "b.tif"])
+        alternatives = properties["assignments"]["items"]["oneOf"]
+        pairs = [
+            (item["properties"]["face"]["const"], item["properties"]["back"]["const"])
+            for item in alternatives
+        ]
+        self.assertEqual(pairs, [("a.tif", "b.tif"), ("b.tif", "a.tif")])
 
     @patch("local_llm.requests.post")
     def test_valid_proposal_is_accepted(self, post):
