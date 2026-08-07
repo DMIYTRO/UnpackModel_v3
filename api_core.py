@@ -201,19 +201,34 @@ def _has_explicit_order_mapping(files: list[Path], order_ids: list[str]) -> bool
 
 
 def _classify_numbered_side_pair(files: list[Path]) -> dict[str, Path | None]:
-    """Recognize ``N_1`` as face and ``N_2`` as back for one layout pair."""
+    """Recognize paired side numbers: ``N_1/N_2`` or names ending in ``1/2``."""
+    if len(files) != 2:
+        return {"face": None, "back": None}
+
     matched: dict[str, Path] = {}
     group_number: str | None = None
     for path in files:
         match = re.fullmatch(r"(\d+)[_-]([12])", path.stem)
         if match is None:
-            return {"face": None, "back": None}
+            break
         current_group, side_number = match.groups()
         if group_number is None:
             group_number = current_group
         elif current_group != group_number:
             return {"face": None, "back": None}
         side = "face" if side_number == "1" else "back"
+        if side in matched:
+            return {"face": None, "back": None}
+        matched[side] = path
+    if len(matched) == 2:
+        return {"face": matched.get("face"), "back": matched.get("back")}
+
+    matched = {}
+    for path in files:
+        match = re.search(r"(?:^|[\s_-])([12])$", path.stem)
+        if match is None:
+            return {"face": None, "back": None}
+        side = "face" if match.group(1) == "1" else "back"
         if side in matched:
             return {"face": None, "back": None}
         matched[side] = path

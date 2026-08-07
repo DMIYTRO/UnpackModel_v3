@@ -130,6 +130,25 @@ class ApiCoreTests(unittest.TestCase):
                 self.assertIn(f"(1-{order_id})_face.jpeg", pair[0][1].name)
                 self.assertIn(f"(1-{order_id})_back.jpeg", pair[1][1].name)
 
+    def test_two_files_ending_in_one_and_two_map_to_face_and_back(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp) / "job_4-4_(1-25699063)_face"
+            folder.mkdir()
+            back = folder / "макет флаєр 2.pdf"
+            face = folder / "макет флаєра 1.pdf"
+            back.write_bytes(pdf_bytes())
+            face.write_bytes(pdf_bytes())
+
+            mapping = build_api_mapping(folder, [back, face], ["25699063"])
+
+            self.assertEqual(
+                [(source.name, destination.name) for source, destination in mapping],
+                [
+                    ("макет флаєра 1.pdf", "job_4-4_(1-25699063)_face.pdf"),
+                    ("макет флаєр 2.pdf", "job_4-4_(1-25699063)_back.pdf"),
+                ],
+            )
+
     def test_two_page_pdf_is_one_valid_two_sided_order(self):
         with TemporaryDirectory() as temp:
             folder = Path(temp) / "job_4-4_(1-12345)_face"
