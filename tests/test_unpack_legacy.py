@@ -246,6 +246,23 @@ class ArchiveLimitTests(unittest.TestCase):
             self.assertTrue(archive.exists())
             self.assertFalse((root / "_TROUBLES_").exists())
 
+    def test_seven_zip_archive_is_discovered_and_preserved_with_order(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            archive = root / "order_4-0.7z"
+            archive.write_bytes(b"7z fixture")
+
+            with (
+                patch("unpack._find_extractor", return_value="unar"),
+                patch("unpack._preflight_rar"),
+                patch("unpack.subprocess.run"),
+            ):
+                unpack_archives(str(root))
+
+            preserved = root / "order_4-0" / ".source_archive" / archive.name
+            self.assertTrue(preserved.exists())
+            self.assertFalse(archive.exists())
+
     def test_archive_over_one_and_half_gb_moves_to_troubles(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)

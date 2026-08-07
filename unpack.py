@@ -23,6 +23,7 @@ ZIP_UTF8_FLAG = 0x800
 CONFLICT_MARKER = ".conflict_pending"
 SOURCE_ARCHIVE_DIR = ".source_archive"
 STALE_TEMP_AGE_SECONDS = 24 * 60 * 60
+ARCHIVE_SUFFIXES = {".rar", ".zip", ".7z"}
 
 
 class ArchiveLimitError(RuntimeError):
@@ -395,7 +396,7 @@ def unpack_archives(source_dir: str, output_dir: str | None = None):
     cleanup_stale_extracting_dirs(output_path)
 
     archive_files = sorted(
-        (item for item in source_path.iterdir() if item.is_file() and item.suffix.lower() in {".rar", ".zip"}),
+        (item for item in source_path.iterdir() if item.is_file() and item.suffix.lower() in ARCHIVE_SUFFIXES),
         key=lambda item: item.name.casefold(),
     )
     if not archive_files:
@@ -403,16 +404,16 @@ def unpack_archives(source_dir: str, output_dir: str | None = None):
         return
 
     # Внешний распаковщик нужен только для RAR. ZIP обрабатывает Python.
-    has_rar = any(item.suffix.lower() == ".rar" for item in archive_files)
-    tool = _find_extractor() if has_rar else None
-    if has_rar and not tool:
+    needs_external_tool = any(item.suffix.lower() in {".rar", ".7z"} for item in archive_files)
+    tool = _find_extractor() if needs_external_tool else None
+    if needs_external_tool and not tool:
         print(
             "❌ Не найден ни один инструмент для распаковки RAR.\n"
             "   macOS : brew install unar\n"
             "   Ubuntu: sudo apt install unar\n"
             "   или   : sudo apt install unrar\n"
             "   или   : sudo apt install p7zip-full\n"
-            "   RAR будут оставлены во входной папке без изменений."
+            "   RAR/7Z будут оставлены во входной папке без изменений."
         )
 
     if tool:
@@ -444,7 +445,7 @@ def unpack_archives(source_dir: str, output_dir: str | None = None):
                 raise ArchiveLimitError(
                     f"Архив превышает лимит 1,5 ГБ: {archive_size / 1_000_000_000:.2f} ГБ"
                 )
-            if archive_file.suffix.lower() == ".rar" and not tool:
+            if archive_file.suffix.lower() in {".rar", ".7z"} and not tool:
                 print("    ⏭ Пропуск: нет программы для распаковки RAR")
                 continue
             if extract_dir_exists:

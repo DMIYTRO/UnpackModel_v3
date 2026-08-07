@@ -339,7 +339,7 @@ def _find_source_archive(source_dir: Path, folder_name: str) -> Path | None:
         if (
             candidate.is_file()
             and candidate.stem == folder_name
-            and candidate.suffix.casefold() in {".rar", ".zip"}
+            and candidate.suffix.casefold() in {".rar", ".zip", ".7z"}
         ):
             return candidate
     return None
@@ -360,7 +360,7 @@ def _archive_source(folder: Path, source_dir: Path) -> Path | None:
         (
             path
             for path in embedded_dir.iterdir()
-            if path.is_file() and path.suffix.casefold() in {".rar", ".zip"}
+            if path.is_file() and path.suffix.casefold() in {".rar", ".zip", ".7z"}
         ),
         key=lambda path: path.name.casefold(),
     ) if embedded_dir.is_dir() else []
