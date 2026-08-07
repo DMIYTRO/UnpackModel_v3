@@ -222,7 +222,12 @@ def request_vision_side_proposal(
         or os.getenv("LOCAL_LLM_BASE_URL")
         or "http://127.0.0.1:1234/v1"
     ).rstrip("/")
-    model_id = model or os.getenv("LOCAL_LLM_MODEL") or "google/gemma-4-e4b"
+    model_id = (
+        model
+        or os.getenv("LOCAL_LLM_VISION_MODEL")
+        or os.getenv("LOCAL_LLM_MODEL")
+        or "google/gemma-4-e4b"
+    )
     request_timeout = timeout or int(os.getenv("LOCAL_LLM_TIMEOUT", "90"))
 
     instruction = {

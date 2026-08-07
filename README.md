@@ -90,6 +90,7 @@ python website_parser.py НОМЕР_ЗАКАЗА
 ```dotenv
 LOCAL_LLM_BASE_URL=http://127.0.0.1:1234/v1
 LOCAL_LLM_MODEL=google/gemma-4-e4b
+LOCAL_LLM_VISION_MODEL=moondream:latest
 LOCAL_LLM_TIMEOUT=90
 ```
 

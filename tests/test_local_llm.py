@@ -73,6 +73,41 @@ class LocalLlmTests(unittest.TestCase):
         self.assertEqual(proposal.assignments[0].face, "a.tif")
         self.assertEqual(proposal.confidence, 0.8)
 
+    @patch("local_llm._image_data_url", return_value="data:image/jpeg;base64,AA==")
+    @patch("local_llm.requests.post")
+    def test_vision_uses_dedicated_model_setting(self, post, _image_data):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"status":"proposal","assignments":['
+                            '{"order_id":"123","face":"a.tif","back":"b.tif"}],'
+                            '"confidence":0.95,"reason":"визуальные признаки"}'
+                        )
+                    }
+                }
+            ]
+        }
+        post.return_value = response
+
+        with patch.dict(
+            "os.environ",
+            {
+                "LOCAL_LLM_MODEL": "gemma4:e2b",
+                "LOCAL_LLM_VISION_MODEL": "moondream:latest",
+            },
+        ):
+            request_vision_side_proposal(
+                "archive.zip",
+                [Path("/tmp/a.tif"), Path("/tmp/b.tif")],
+                ["123"],
+            )
+
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "moondream:latest")
+
     @patch("local_llm.requests.post")
     def test_invented_filename_is_rejected(self, post):
         response = Mock()
