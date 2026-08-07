@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UnpackModel — операторская панель</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div><p class="eyebrow">UNPACKMODEL</p><h1>Распаковка и переименование</h1></div>
+    <span id="connection" class="badge">Подключение…</span>
+  </header>
+
+  <main>
+    <section class="panel" aria-labelledby="launch-title">
+      <div class="section-head"><div><p class="eyebrow">НОВЫЙ ЗАПУСК</p><h2 id="launch-title">Серверные папки</h2></div></div>
+      <form id="run-form">
+        <div class="fields">
+          <label>Папка с архивами<input id="source" name="source_dir" required placeholder="/mnt/shared/UnpackModel/incoming" autocomplete="off"></label>
+          <label>Папка результата<input id="output" name="output_dir" required placeholder="/mnt/shared/UnpackModel/processed" autocomplete="off"></label>
+        </div>
+        <div class="options">
+          <label class="check"><input id="llm" name="use_llm" type="checkbox" checked> Использовать LM Studio</label>
+          <label class="check"><input id="strict" name="strict" type="checkbox"> Строгая проверка подзаказов</label>
+        </div>
+        <div class="actions"><button class="primary" type="submit">Запустить обработку</button><button id="cancel-run" class="danger" type="button" disabled>Остановить запуск</button></div>
+      </form>
+    </section>
+
+    <section class="panel" aria-labelledby="progress-title">
+      <div class="section-head"><div><p class="eyebrow">ТЕКУЩИЙ ЗАПУСК</p><h2 id="progress-title">Прогресс</h2></div><span id="run-status" class="badge muted">Нет запуска</span></div>
+      <div class="progress"><div id="progress-bar"></div></div>
+      <p id="progress-text" class="muted-text">Ожидание запуска</p>
+      <details><summary>Журнал событий</summary><ol id="log" class="log" aria-live="polite"></ol></details>
+    </section>
+
+    <section class="panel" aria-labelledby="queue-title">
+      <div class="section-head"><div><p class="eyebrow">ТРЕБУЮТ РЕШЕНИЯ</p><h2 id="queue-title">Заказы</h2></div><button id="refresh" class="ghost" type="button">Обновить</button></div>
+      <div id="orders" class="orders"><p class="empty">Нет заказов, ожидающих решения.</p></div>
+    </section>
+  </main>
+
+  <dialog id="order-dialog">
+    <form method="dialog" class="dialog-head"><div><p class="eyebrow">ПРОВЕРКА ИМЁН</p><h2 id="dialog-title">Заказ</h2></div><button class="icon" aria-label="Закрыть">×</button></form>
+    <div id="files" class="files"></div>
+    <div class="dialog-actions">
+      <button id="approve" class="primary" type="button">Подтвердить</button>
+      <button id="postpone" class="ghost" type="button">Отложить</button>
+      <button id="manual" class="danger" type="button">На ручную проверку</button>
+    </div>
+    <p id="dialog-error" class="error" role="alert"></p>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

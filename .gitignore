@@ -27,6 +27,7 @@ test_archives/
 # Лог переименований (генерируется автоматически)
 rename_log.txt
 llm_proposals.json
+.web_state/
 
 # Собранные пакеты для переноса
 dist/

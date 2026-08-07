@@ -1,0 +1,27 @@
+[Unit]
+Description=UnpackModel operator web interface
+After=network-online.target remote-fs.target
+Wants=network-online.target
+RequiresMountsFor=/mnt/shared
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/unpackmodel
+EnvironmentFile=-/opt/unpackmodel/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=UNPACK_WEB_HOST=0.0.0.0
+Environment=UNPACK_WEB_PORT=8016
+Environment=UNPACK_ALLOWED_ROOTS=/mnt/shared/Archives:/mnt/shared/Processed
+Environment=UNPACK_SOURCE_DIR=/mnt/shared/Archives
+Environment=UNPACK_OUTPUT_DIR=/mnt/shared/Processed
+Environment=UNPACK_WEB_STATE_PATH=/var/lib/unpackmodel/state.json
+StateDirectory=unpackmodel
+ExecStart=/opt/unpackmodel/.venv/bin/python -m web.app
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

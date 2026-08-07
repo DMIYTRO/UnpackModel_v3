@@ -2,3 +2,5 @@ python-dotenv==1.2.2
 requests>=2.32,<3
 pypdf>=5,<7
 Pillow>=11,<13
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1

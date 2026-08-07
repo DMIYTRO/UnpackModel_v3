@@ -25,6 +25,9 @@ git archive --format=tar HEAD \
       "pct exec ${CONTAINER_ID} -- tar -x -f - -C '${REMOTE_APP_DIR}'"
 
 ssh -o StrictHostKeyChecking=accept-new "root@${PROXMOX_HOST}" \
-  "pct exec ${CONTAINER_ID} -- sh -c 'printf \"%s\\n\" ${COMMIT} > ${REMOTE_APP_DIR}/DEPLOY_VERSION && ${REMOTE_APP_DIR}/.venv/bin/python -m unittest discover -s ${REMOTE_APP_DIR}/tests -q'"
+  "pct exec ${CONTAINER_ID} -- sh -c '${REMOTE_APP_DIR}/.venv/bin/python -m pip install -r ${REMOTE_APP_DIR}/requirements.txt && ${REMOTE_APP_DIR}/.venv/bin/python -m unittest discover -s ${REMOTE_APP_DIR}/tests -q && install -m 0644 ${REMOTE_APP_DIR}/deploy/ubuntu/unpackmodel-web.service /etc/systemd/system/unpackmodel-web.service && systemctl daemon-reload && systemctl enable --now unpackmodel-web.service && systemctl restart unpackmodel-web.service && printf \"%s\\n\" ${COMMIT} > ${REMOTE_APP_DIR}/DEPLOY_VERSION'"
+
+ssh -o StrictHostKeyChecking=accept-new "root@${PROXMOX_HOST}" \
+  "pct exec ${CONTAINER_ID} -- sh -c 'systemctl is-active --quiet unpackmodel-web.service && curl --fail --silent http://127.0.0.1:8016/api/health'"
 
 echo "Деплой завершён успешно: ${COMMIT}"
