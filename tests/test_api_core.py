@@ -229,6 +229,38 @@ class ApiCoreTests(unittest.TestCase):
                     ["25694445", "25694446", "25694447", "25694448", "25694449"],
                 )
 
+    def test_two_vector_files_per_order_are_sequential_face_back_pairs(self):
+        for extension in (".cdr", ".ai"):
+            with self.subTest(extension=extension), TemporaryDirectory() as temp:
+                folder = Path(temp) / "job_4-4_(1-25694445)_face"
+                folder.mkdir()
+                files = []
+                for page in range(1, 11):
+                    path = folder / f"page {page}{extension}"
+                    path.write_bytes(b"vector side")
+                    files.append(path)
+                order_ids = ["25694445", "25694446", "25694447", "25694448", "25694449"]
+
+                mapping = build_api_mapping(
+                    folder,
+                    list(reversed(files)),
+                    order_ids,
+                )
+
+                self.assertEqual(len(mapping), 10)
+                for order_index, order_id in enumerate(order_ids):
+                    pair = mapping[order_index * 2:order_index * 2 + 2]
+                    first_page = order_index * 2 + 1
+                    self.assertEqual(
+                        [source.name for source, _ in pair],
+                        [
+                            f"page {first_page}{extension}",
+                            f"page {first_page + 1}{extension}",
+                        ],
+                    )
+                    self.assertIn(f"(1-{order_id})_face", pair[0][1].name)
+                    self.assertIn(f"(1-{order_id})_back", pair[1][1].name)
+
     def test_one_page_pdf_is_rejected_for_two_sided_order(self):
         with TemporaryDirectory() as temp:
             folder = Path(temp) / "job_4-4_(1-12345)_face"

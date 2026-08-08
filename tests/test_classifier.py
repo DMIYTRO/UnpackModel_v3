@@ -80,6 +80,10 @@ class ClassifierTests(unittest.TestCase):
             classify_face_back(["brief.tif", "job-12341.tif"]),
             {"face": None, "back": None},
         )
+        self.assertEqual(
+            classify_face_back(["page9.cdr", "page10.cdr"]),
+            {"face": None, "back": None},
+        )
 
     def test_pdf_preview_is_not_treated_as_print_layout(self):
         with TemporaryDirectory() as temp:

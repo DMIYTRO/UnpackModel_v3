@@ -319,13 +319,19 @@ def build_api_mapping(
     # документа, но без запуска соответствующего редактора страницы надёжно
     # не посчитать. Если количество таких файлов уже равно количеству заказов,
     # бизнес-правило однозначно: один файл является полным комплектом заказа.
+    all_vector_files = bool(files) and all(
+        path.suffix.casefold() in VECTOR_CONTAINER_EXTENSIONS
+        for path in files
+    )
     vector_containers = (
         per_suborder == 2
         and len(files) == len(order_ids)
-        and all(
-            path.suffix.casefold() in VECTOR_CONTAINER_EXTENSIONS
-            for path in files
-        )
+        and all_vector_files
+    )
+    vector_side_pairs = (
+        per_suborder == 2
+        and len(files) == len(order_ids) * per_suborder
+        and all_vector_files
     )
     if vector_containers:
         page_details = {path: per_suborder for path in files}
@@ -362,6 +368,15 @@ def build_api_mapping(
                 classified = classify_face_back_paths(batch)
                 if classified["face"] is None or classified["back"] is None:
                     classified = _classify_numbered_side_pair(batch)
+                if (
+                    vector_side_pairs
+                    and (classified["face"] is None or classified["back"] is None)
+                ):
+                    ordered_pair = sorted(batch, key=_layout_sort_key)
+                    classified = {
+                        "face": ordered_pair[0],
+                        "back": ordered_pair[1],
+                    }
                 if classified["face"] is None or classified["back"] is None:
                     names = ", ".join(path.name for path in batch)
                     raise AmbiguousSidesError(

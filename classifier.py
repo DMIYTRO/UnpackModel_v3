@@ -113,7 +113,11 @@ def _side_matches(texts: list[str]) -> tuple[bool, bool]:
             # составного имени без разделителей: ``cardfrontfinal``.
             compact_marker = re.sub(r"[\s._-]+", "", marker)
             compact_name = re.sub(r"[\s._-]+", "", raw)
-            if len(compact_marker) >= 5 and compact_marker in compact_name:
+            if (
+                len(compact_marker) >= 5
+                and not any(character.isdigit() for character in compact_marker)
+                and compact_marker in compact_name
+            ):
                 return True
         return False
 
