@@ -178,6 +178,57 @@ class ApiCoreTests(unittest.TestCase):
             self.assertIn("12345", mapping[0][1].name)
             self.assertIn("12346", mapping[1][1].name)
 
+    def test_one_corel_or_illustrator_file_per_order_is_a_complete_set(self):
+        for extension in (".cdr", ".ai"):
+            with self.subTest(extension=extension), TemporaryDirectory() as temp:
+                folder = Path(temp) / "job_4-4_(1-25694445)_face"
+                folder.mkdir()
+                files = []
+                for first_page in range(1, 10, 2):
+                    path = folder / f"page {first_page}-{first_page + 1}{extension}"
+                    path.write_bytes(b"vector layout")
+                    files.append(path)
+                order_ids = ["25694445", "25694446", "25694447", "25694448", "25694449"]
+
+                mapping = build_api_mapping(
+                    folder,
+                    list(reversed(files)),
+                    order_ids,
+                )
+
+                self.assertEqual(
+                    [source.name for source, _ in mapping],
+                    [
+                        f"page 1-2{extension}",
+                        f"page 3-4{extension}",
+                        f"page 5-6{extension}",
+                        f"page 7-8{extension}",
+                        f"page 9-10{extension}",
+                    ],
+                )
+                for index, (order_id, (_, destination)) in enumerate(
+                    zip(order_ids, mapping),
+                    start=1,
+                ):
+                    self.assertIn(f"(1-{order_id})_face_{index}", destination.name)
+
+    def test_vector_container_rule_requires_one_file_per_order(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp) / "job_4-4_(1-25694445)_face"
+            folder.mkdir()
+            files = []
+            for index in range(4):
+                path = folder / f"layout-{index}.cdr"
+                path.write_bytes(b"vector layout")
+                files.append(path)
+
+            with self.assertRaises(ApiCoreError):
+                build_api_mapping(
+                    folder,
+                    files,
+                    ["25694445", "25694446", "25694447", "25694448", "25694449"],
+                )
+
     def test_one_page_pdf_is_rejected_for_two_sided_order(self):
         with TemporaryDirectory() as temp:
             folder = Path(temp) / "job_4-4_(1-12345)_face"

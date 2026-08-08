@@ -45,6 +45,7 @@ DONE_MARKER = ".done"
 STATE_FILE = ".processing_state.json"
 CONFLICT_MARKER = ".conflict_pending"
 MANUAL_CHECK_DIR = "_REQUIRES_MANUAL_CHECK_"
+VECTOR_CONTAINER_EXTENSIONS = frozenset({".ai", ".cdr"})
 
 
 class ApiCoreError(RuntimeError):
@@ -314,6 +315,20 @@ def build_api_mapping(
 
     per_suborder = files_per_suborder(folder.name)
     page_details = count_layout_units(files)[1]
+    # CorelDRAW/Illustrator могут хранить обе стороны заказа внутри одного
+    # документа, но без запуска соответствующего редактора страницы надёжно
+    # не посчитать. Если количество таких файлов уже равно количеству заказов,
+    # бизнес-правило однозначно: один файл является полным комплектом заказа.
+    vector_containers = (
+        per_suborder == 2
+        and len(files) == len(order_ids)
+        and all(
+            path.suffix.casefold() in VECTOR_CONTAINER_EXTENSIONS
+            for path in files
+        )
+    )
+    if vector_containers:
+        page_details = {path: per_suborder for path in files}
     groups = _group_files_by_order(
         files,
         page_details,
