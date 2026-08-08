@@ -36,6 +36,8 @@ class ClassifierTests(unittest.TestCase):
             ("макет-a.tif", "макет-z.tif"),
             ("cardfrontfinal.tif", "cardreversefinal.tif"),
             ("cover-design.tif", "businesscardback.tif"),
+            ("Deluxe_(Flyer)_Outer.pdf", "Deluxe_(Flyer)_Inner.pdf"),
+            ("10_лицо (2).jpg", "10_оборот (1).jpg"),
         ]
         for face, back in cases:
             with self.subTest(face=face, back=back):
