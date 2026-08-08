@@ -384,7 +384,12 @@ class ApiCoreTests(unittest.TestCase):
             root = Path(temp)
             folder = root / "job_4-4_(1-12345)_face"
             folder.mkdir()
-            for name in ("1-a.tif", "1-b.tif", "2-a.tif", "2-b.tif"):
+            for name in (
+                "1-alpha.tif",
+                "1-beta.tif",
+                "2-alpha.tif",
+                "2-beta.tif",
+            ):
                 (folder / name).write_bytes(b"layout")
 
             proposals = [
@@ -392,8 +397,8 @@ class ApiCoreTests(unittest.TestCase):
                     assignments=(
                         SideAssignment(
                             order_id="12345",
-                            face="1-a.tif",
-                            back="1-b.tif",
+                            face="1-alpha.tif",
+                            back="1-beta.tif",
                         ),
                     ),
                     confidence=0.9,
@@ -403,8 +408,8 @@ class ApiCoreTests(unittest.TestCase):
                     assignments=(
                         SideAssignment(
                             order_id="12346",
-                            face="2-a.tif",
-                            back="2-b.tif",
+                            face="2-alpha.tif",
+                            back="2-beta.tif",
                         ),
                     ),
                     confidence=0.9,
@@ -439,16 +444,16 @@ class ApiCoreTests(unittest.TestCase):
             root = Path(temp)
             folder = root / "job_4-4_(1-12345)_face"
             folder.mkdir()
-            first = folder / "a.tif"
-            second = folder / "b.tif"
+            first = folder / "alpha.tif"
+            second = folder / "beta.tif"
             first.write_bytes(b"a")
             second.write_bytes(b"b")
             visual = LlmProposal(
                 assignments=(
                     SideAssignment(
                         order_id="12345",
-                        face="a.tif",
-                        back="b.tif",
+                        face="alpha.tif",
+                        back="beta.tif",
                     ),
                 ),
                 confidence=0.95,

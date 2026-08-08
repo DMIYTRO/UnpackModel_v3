@@ -20,6 +20,22 @@ class ClassifierTests(unittest.TestCase):
             ("Сторона А.tif", "Сторона Б.tif"),
             ("макет титул.tif", "макет зворот.tif"),
             ("front.pdf", "back.pdf"),
+            ("card-cover.pdf", "card-reverse.pdf"),
+            ("card-F.tif", "card-B.tif"),
+            ("card_1.tif", "card_2.tif"),
+            ("макет лиц.tif", "макет обор.tif"),
+            ("обложка.tif", "изнанка.tif"),
+            ("первая сторона.tif", "вторая сторона.tif"),
+            ("обкладинка.tif", "виворіт.tif"),
+            ("перша сторона.tif", "друга сторона.tif"),
+            ("obverse.tif", "verso.tif"),
+            ("page_1.tif", "page_2.tif"),
+            ("макет-прд.tif", "макет-звр.tif"),
+            ("card-f1.tif", "card-b2.tif"),
+            ("макет(1).tif", "макет(2).tif"),
+            ("макет-a.tif", "макет-z.tif"),
+            ("cardfrontfinal.tif", "cardreversefinal.tif"),
+            ("cover-design.tif", "businesscardback.tif"),
         ]
         for face, back in cases:
             with self.subTest(face=face, back=back):
@@ -48,6 +64,18 @@ class ClassifierTests(unittest.TestCase):
     def test_unknown_pair_stays_ambiguous(self):
         self.assertEqual(
             classify_face_back(["alpha.tif", "beta.tif"]),
+            {"face": None, "back": None},
+        )
+
+    def test_one_explicit_marker_determines_the_other_file(self):
+        self.assertEqual(
+            classify_face_back(["design.tif", "оборот.tif"]),
+            {"face": "design.tif", "back": "оборот.tif"},
+        )
+
+    def test_short_markers_do_not_match_inside_words_or_numbers(self):
+        self.assertEqual(
+            classify_face_back(["brief.tif", "job-12341.tif"]),
             {"face": None, "back": None},
         )
 
