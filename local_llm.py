@@ -190,7 +190,12 @@ def request_side_proposal(
         "task": (
             "Assign every filename exactly once to face or back of an order. "
             "Use only supplied filenames and order IDs. If evidence is insufficient, "
-            "return status=ambiguous. Never guess merely from alphabetical order. "
+            "return status=ambiguous. The filename convention is authoritative: "
+            "for a numbered pair N_1/N_2 (also N-1/N-2 or names ending in a "
+            "separated 1/2), side 1 is face and side 2 is back; N is the 1-based "
+            "position of the order in order_ids_in_printing_order. Apply this "
+            "convention when present. Otherwise never guess merely from "
+            "alphabetical order. "
             "File extension and file type (PDF, TIFF, JPEG, etc.) do not indicate "
             "face or back and must never be used as side evidence."
         ),
@@ -327,6 +332,9 @@ def request_vision_side_proposal(
         "order_id": order_ids[0],
         "task": (
             "Определи лицо и оборот печатного макета по содержимому изображений. "
+            "Сначала учитывай явное правило имён: суффикс _1, -1 или отдельная "
+            "цифра 1 в конце означает лицо; _2, -2 или отдельная цифра 2 в конце "
+            "означает оборот. "
             "Логотип/главная идентификация обычно являются лицом; адрес, телефон, "
             "QR-код и подробные контакты обычно являются оборотом. Используй только "
             "указанные имена. Если содержимого недостаточно, верни status=ambiguous."
