@@ -45,6 +45,7 @@ DONE_MARKER = ".done"
 STATE_FILE = ".processing_state.json"
 CONFLICT_MARKER = ".conflict_pending"
 MANUAL_CHECK_DIR = "_REQUIRES_MANUAL_CHECK_"
+VECTOR_CONTAINER_EXTENSIONS = frozenset({".ai", ".cdr"})
 
 
 class ApiCoreError(RuntimeError):
@@ -314,6 +315,26 @@ def build_api_mapping(
 
     per_suborder = files_per_suborder(folder.name)
     page_details = count_layout_units(files)[1]
+    # CorelDRAW/Illustrator могут хранить обе стороны заказа внутри одного
+    # документа, но без запуска соответствующего редактора страницы надёжно
+    # не посчитать. Если количество таких файлов уже равно количеству заказов,
+    # бизнес-правило однозначно: один файл является полным комплектом заказа.
+    all_vector_files = bool(files) and all(
+        path.suffix.casefold() in VECTOR_CONTAINER_EXTENSIONS
+        for path in files
+    )
+    vector_containers = (
+        per_suborder == 2
+        and len(files) == len(order_ids)
+        and all_vector_files
+    )
+    vector_side_pairs = (
+        per_suborder == 2
+        and len(files) == len(order_ids) * per_suborder
+        and all_vector_files
+    )
+    if vector_containers:
+        page_details = {path: per_suborder for path in files}
     groups = _group_files_by_order(
         files,
         page_details,
@@ -347,6 +368,15 @@ def build_api_mapping(
                 classified = classify_face_back_paths(batch)
                 if classified["face"] is None or classified["back"] is None:
                     classified = _classify_numbered_side_pair(batch)
+                if (
+                    vector_side_pairs
+                    and (classified["face"] is None or classified["back"] is None)
+                ):
+                    ordered_pair = sorted(batch, key=_layout_sort_key)
+                    classified = {
+                        "face": ordered_pair[0],
+                        "back": ordered_pair[1],
+                    }
                 if classified["face"] is None or classified["back"] is None:
                     names = ", ".join(path.name for path in batch)
                     raise AmbiguousSidesError(
@@ -391,16 +421,33 @@ def _unique_destination(directory: Path, filename: str) -> Path:
 
 
 def _archive_source(folder: Path, source_dir: Path) -> Path | None:
-    """Возвращает архив из папки заказа, мигрируя результат старого запуска."""
-    embedded_dir = folder / SOURCE_ARCHIVE_DIR
-    embedded = sorted(
-        (
-            path
-            for path in embedded_dir.iterdir()
-            if path.is_file() and path.suffix.casefold() in {".rar", ".zip", ".7z"}
-        ),
-        key=lambda path: path.name.casefold(),
-    ) if embedded_dir.is_dir() else []
+    """Возвращает исходный архив в папке заказа, при необходимости перенося его.
+
+    Архив хранится прямо в папке заказа. Архивы, сохранённые прежними версиями
+    в скрытой ``.source_archive/``, переносятся туда же.
+    """
+    extensions = {".rar", ".zip", ".7z"}
+
+    def own_archives(directory: Path) -> list[Path]:
+        if not directory.is_dir():
+            return []
+        return sorted(
+            (
+                path for path in directory.iterdir()
+                if path.is_file()
+                and path.suffix.casefold() in extensions
+                and path.stem.startswith(folder.name)
+            ),
+            key=lambda path: path.name.casefold(),
+        )
+
+    legacy_dir = folder / SOURCE_ARCHIVE_DIR
+    for legacy in own_archives(legacy_dir):
+        shutil.move(str(legacy), str(_unique_destination(folder, legacy.name)))
+    if legacy_dir.is_dir() and not any(legacy_dir.iterdir()):
+        legacy_dir.rmdir()
+
+    embedded = own_archives(folder)
     if len(embedded) > 1:
         raise ApiCoreError(
             f"В папке {folder.name} найдено несколько исходных архивов"
@@ -411,8 +458,7 @@ def _archive_source(folder: Path, source_dir: Path) -> Path | None:
     archive = _find_source_archive(source_dir, folder.name)
     if archive is None:
         return None
-    embedded_dir.mkdir(exist_ok=True)
-    destination = _unique_destination(embedded_dir, archive.name)
+    destination = _unique_destination(folder, archive.name)
     shutil.move(str(archive), str(destination))
     return destination
 

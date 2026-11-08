@@ -178,6 +178,89 @@ class ApiCoreTests(unittest.TestCase):
             self.assertIn("12345", mapping[0][1].name)
             self.assertIn("12346", mapping[1][1].name)
 
+    def test_one_corel_or_illustrator_file_per_order_is_a_complete_set(self):
+        for extension in (".cdr", ".ai"):
+            with self.subTest(extension=extension), TemporaryDirectory() as temp:
+                folder = Path(temp) / "job_4-4_(1-25694445)_face"
+                folder.mkdir()
+                files = []
+                for first_page in range(1, 10, 2):
+                    path = folder / f"page {first_page}-{first_page + 1}{extension}"
+                    path.write_bytes(b"vector layout")
+                    files.append(path)
+                order_ids = ["25694445", "25694446", "25694447", "25694448", "25694449"]
+
+                mapping = build_api_mapping(
+                    folder,
+                    list(reversed(files)),
+                    order_ids,
+                )
+
+                self.assertEqual(
+                    [source.name for source, _ in mapping],
+                    [
+                        f"page 1-2{extension}",
+                        f"page 3-4{extension}",
+                        f"page 5-6{extension}",
+                        f"page 7-8{extension}",
+                        f"page 9-10{extension}",
+                    ],
+                )
+                for index, (order_id, (_, destination)) in enumerate(
+                    zip(order_ids, mapping),
+                    start=1,
+                ):
+                    self.assertIn(f"(1-{order_id})_face_{index}", destination.name)
+
+    def test_vector_container_rule_requires_one_file_per_order(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp) / "job_4-4_(1-25694445)_face"
+            folder.mkdir()
+            files = []
+            for index in range(4):
+                path = folder / f"layout-{index}.cdr"
+                path.write_bytes(b"vector layout")
+                files.append(path)
+
+            with self.assertRaises(ApiCoreError):
+                build_api_mapping(
+                    folder,
+                    files,
+                    ["25694445", "25694446", "25694447", "25694448", "25694449"],
+                )
+
+    def test_two_vector_files_per_order_are_sequential_face_back_pairs(self):
+        for extension in (".cdr", ".ai"):
+            with self.subTest(extension=extension), TemporaryDirectory() as temp:
+                folder = Path(temp) / "job_4-4_(1-25694445)_face"
+                folder.mkdir()
+                files = []
+                for page in range(1, 11):
+                    path = folder / f"page {page}{extension}"
+                    path.write_bytes(b"vector side")
+                    files.append(path)
+                order_ids = ["25694445", "25694446", "25694447", "25694448", "25694449"]
+
+                mapping = build_api_mapping(
+                    folder,
+                    list(reversed(files)),
+                    order_ids,
+                )
+
+                self.assertEqual(len(mapping), 10)
+                for order_index, order_id in enumerate(order_ids):
+                    pair = mapping[order_index * 2:order_index * 2 + 2]
+                    first_page = order_index * 2 + 1
+                    self.assertEqual(
+                        [source.name for source, _ in pair],
+                        [
+                            f"page {first_page}{extension}",
+                            f"page {first_page + 1}{extension}",
+                        ],
+                    )
+                    self.assertIn(f"(1-{order_id})_face", pair[0][1].name)
+                    self.assertIn(f"(1-{order_id})_back", pair[1][1].name)
+
     def test_one_page_pdf_is_rejected_for_two_sided_order(self):
         with TemporaryDirectory() as temp:
             folder = Path(temp) / "job_4-4_(1-12345)_face"
@@ -341,7 +424,7 @@ class ApiCoreTests(unittest.TestCase):
             folder = root / "job_4-0_(1-12345)_face"
             self.assertTrue(summary.ok)
             self.assertTrue((folder / "job_4-0_(1-12345)_face_1.pdf").exists())
-            self.assertTrue((folder / ".source_archive" / archive_name).exists())
+            self.assertTrue((folder / archive_name).exists())
             self.assertFalse((root / archive_name).exists())
 
     @patch("api_core.unpack_archives")
@@ -512,6 +595,22 @@ class ApiCoreTests(unittest.TestCase):
             second_fetch.assert_not_called()
             fetch.assert_called_once()
 
+
+
+class ArchiveSourceLocationTests(unittest.TestCase):
+    def test_legacy_hidden_archive_moves_into_order_folder(self):
+        import tempfile
+        from api_core import _archive_source
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "order_4-0_(1-123)"
+            legacy = folder / ".source_archive"
+            legacy.mkdir(parents=True)
+            (legacy / "order_4-0_(1-123).zip").write_bytes(b"zip")
+            result = _archive_source(folder, root)
+            self.assertEqual(result, folder / "order_4-0_(1-123).zip")
+            self.assertTrue(result.exists())
+            self.assertFalse(legacy.exists())
 
 if __name__ == "__main__":
     unittest.main()

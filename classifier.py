@@ -18,6 +18,7 @@ SIDE_MARKERS = {
         "en": (
             "front", "face", "cover", "obverse", "recto", "main",
             "primary", "side1", "side_1", "page1", "page_1", "top",
+            "outer", "outside",
         ),
     },
     "back": {
@@ -33,7 +34,8 @@ SIDE_MARKERS = {
         ),
         "en": (
             "back", "reverse", "verso", "rear", "flip", "side2",
-            "side_2", "page2", "page_2", "bottom", "secondary",
+            "side_2", "page2", "page_2", "bottom", "secondary", "inner",
+            "inside",
         ),
     },
 }
@@ -48,18 +50,19 @@ SIDE_ABBREVIATIONS = {
 # Маркеры окружены границами слов, чтобы, например, ``лице`` не совпадало
 # внутри слова ``таблице``. Список покрывает распространённые русские,
 # украинские и английские названия сторон.
-FACE_PATTERNS = (
+FACE_WORD_PATTERNS = (
     r"(?<!\w)лиц(?:о|е|евой|евая|евое|евые|евой|евої|ева|евий|еві)(?!\w)",
     r"(?<!\w)лицьов(?:а|ий|е|і|ої|ому)?(?!\w)",
     r"(?<!\w)(?:перед|передня|передняя|передній|передний|фасад|титул)(?!\w)",
     r"(?<!\w)(?:face|front|recto|cover)(?!\w)",
     r"(?<!\w)(?:сторона|side)[\s._-]*(?:1|a|а)(?!\w)",
     r"(?<!\w)(?:1|a|а)[\s._-]*(?:сторона|side)(?!\w)",
+)
+FACE_PATTERNS = (
     r"(?:^|[\s._-])(?:1|f|a|л)$",
     r"(?:\(1\)|#1)(?!\d)",
-    r"(?:^|[_-])front(?:$|[_-])",
 )
-BACK_PATTERNS = (
+BACK_WORD_PATTERNS = (
     r"(?<!\w)оборот(?:ная|ний|на|ное|ний|ка)?(?!\w)",
     r"(?<!\w)обрат(?:ная|ный|на|ний|ное|ка)(?!\w)",
     r"(?<!\w)зворот(?:на|ний|ній|не|ній|ка)?(?!\w)",
@@ -67,9 +70,11 @@ BACK_PATTERNS = (
     r"(?<!\w)(?:back|rear|verso|reverse)(?!\w)",
     r"(?<!\w)(?:сторона|side)[\s._-]*(?:2|b|б)(?!\w)",
     r"(?<!\w)(?:2|b|б)[\s._-]*(?:сторона|side)(?!\w)",
+    r"back$",
+)
+BACK_PATTERNS = (
     r"(?:^|[\s._-])(?:2|b|z|о|з)$",
     r"(?:\(2\)|#2)(?!\d)",
-    r"back$|(?:^|[_-])back(?:[_-])",
 )
 
 # Вспомогательные изображения не являются печатными сторонами. Наряду с
@@ -108,7 +113,11 @@ def _side_matches(texts: list[str]) -> tuple[bool, bool]:
             # составного имени без разделителей: ``cardfrontfinal``.
             compact_marker = re.sub(r"[\s._-]+", "", marker)
             compact_name = re.sub(r"[\s._-]+", "", raw)
-            if len(compact_marker) >= 5 and compact_marker in compact_name:
+            if (
+                len(compact_marker) >= 5
+                and not any(character.isdigit() for character in compact_marker)
+                and compact_marker in compact_name
+            ):
                 return True
         return False
 
@@ -118,10 +127,21 @@ def _side_matches(texts: list[str]) -> tuple[bool, bool]:
             for marker in SIDE_ABBREVIATIONS[side]
         )
 
+    # Явные слова имеют приоритет над слабыми числовыми маркерами. Например,
+    # ``оборот (1)`` — это оборот с номером копии, а не лицевая сторона.
+    face_word = has_marker("face") or any(
+        re.search(pattern, normalized) for pattern in FACE_WORD_PATTERNS
+    )
+    back_word = has_marker("back") or any(
+        re.search(pattern, normalized) for pattern in BACK_WORD_PATTERNS
+    )
+    if face_word or back_word:
+        return face_word, back_word
+
     return (
-        has_marker("face") or has_abbreviation("face")
+        has_abbreviation("face")
         or any(re.search(pattern, raw) for pattern in FACE_PATTERNS),
-        has_marker("back") or has_abbreviation("back")
+        has_abbreviation("back")
         or any(re.search(pattern, raw) for pattern in BACK_PATTERNS),
     )
 

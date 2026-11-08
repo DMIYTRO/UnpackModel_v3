@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -105,6 +106,28 @@ class LocalLlmTests(unittest.TestCase):
 
         self.assertEqual(proposal.assignments[0].face, "a.tif")
         self.assertEqual(proposal.confidence, 0.8)
+
+    @patch("local_llm.requests.post")
+    def test_text_prompt_defines_numbered_side_convention(self, post):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [{"message": {"content": (
+                '{"status":"proposal","assignments":['
+                '{"order_id":"123","face":"1_1.jpeg","back":"1_2.jpeg"}],'
+                '"confidence":1,"reason":"правило имени"}'
+            )}}]
+        }
+        post.return_value = response
+
+        request_side_proposal(
+            "archive.zip", ["1_1.jpeg", "1_2.jpeg"], ["123"]
+        )
+
+        user_prompt = post.call_args.kwargs["json"]["messages"][1]["content"]
+        task = json.loads(user_prompt)["task"]
+        self.assertIn("side 1 is face and side 2 is back", task)
+        self.assertIn("1-based position", task)
 
     @patch("local_llm._image_data_url", return_value="data:image/jpeg;base64,AA==")
     @patch("local_llm.requests.post")

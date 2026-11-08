@@ -36,6 +36,8 @@ class ClassifierTests(unittest.TestCase):
             ("макет-a.tif", "макет-z.tif"),
             ("cardfrontfinal.tif", "cardreversefinal.tif"),
             ("cover-design.tif", "businesscardback.tif"),
+            ("Deluxe_(Flyer)_Outer.pdf", "Deluxe_(Flyer)_Inner.pdf"),
+            ("10_лицо (2).jpg", "10_оборот (1).jpg"),
         ]
         for face, back in cases:
             with self.subTest(face=face, back=back):
@@ -76,6 +78,10 @@ class ClassifierTests(unittest.TestCase):
     def test_short_markers_do_not_match_inside_words_or_numbers(self):
         self.assertEqual(
             classify_face_back(["brief.tif", "job-12341.tif"]),
+            {"face": None, "back": None},
+        )
+        self.assertEqual(
+            classify_face_back(["page9.cdr", "page10.cdr"]),
             {"face": None, "back": None},
         )
 
