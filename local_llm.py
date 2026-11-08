@@ -63,6 +63,39 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+def _grammar_names(filenames: list[str]) -> tuple[list[str], dict[str, str]]:
+    """ASCII-псевдонимы для имён файлов, которые идут в грамматику ответа.
+
+    LM Studio строит из JSON-схемы грамматику (llguidance); с ``const``/``enum``
+    из украинских и русских букв (например «ї») она падает с HTTP 400
+    «token doesn't satisfy the grammar». Поэтому, если в именах есть не-ASCII,
+    модель отвечает псевдонимами file_1, file_2, …, а мы переводим их обратно.
+    """
+    if all(name.isascii() for name in filenames):
+        return list(filenames), {}
+    aliases = [f"file_{index}" for index in range(1, len(filenames) + 1)]
+    return aliases, dict(zip(aliases, filenames))
+
+
+def _restore_names(result: dict, mapping: dict[str, str]) -> dict:
+    """Возвращает в ответе модели настоящие имена вместо псевдонимов."""
+    if not mapping or not isinstance(result.get("assignments"), list):
+        return result
+    restored = []
+    for item in result["assignments"]:
+        if isinstance(item, dict):
+            item = {
+                **item,
+                **{
+                    key: mapping.get(item.get(key), item.get(key))
+                    for key in ("face", "back")
+                    if key in item
+                },
+            }
+        restored.append(item)
+    return {**result, "assignments": restored}
+
+
 def _response_format(filenames: list[str], order_ids: list[str]) -> dict:
     """Строгая схема ответа для поддерживаемого Ollama JSON mode."""
     generic_assignment = {
@@ -116,6 +149,20 @@ def _response_format(filenames: list[str], order_ids: list[str]) -> dict:
             },
         },
     }
+
+
+def _raise_for_status(response) -> None:
+    """raise_for_status, но с текстом ошибки LM Studio (а не только «400»)."""
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        body = ""
+        try:
+            body = str(response.text or "")
+        except Exception:  # noqa: BLE001 - тело ответа лишь поясняет ошибку
+            pass
+        detail = " ".join(body.split())[-300:]
+        raise LocalLlmError(f"{exc}" + (f" — {detail}" if detail else "")) from exc
 
 
 def _extract_json_content(payload: dict) -> dict:
@@ -199,12 +246,18 @@ def request_side_proposal(
     request_timeout = timeout or int(os.getenv("LOCAL_LLM_TIMEOUT", "90"))
     filenames = [str(item) if isinstance(item, str) else item.name for item in files]
 
+    schema_names, alias_map = _grammar_names(filenames)
     instruction = {
         "archive_name": archive_name,
         "order_ids_in_printing_order": order_ids,
-        "filenames": filenames,
+        "filenames": (
+            [{"id": alias, "filename": name} for alias, name in alias_map.items()]
+            if alias_map
+            else filenames
+        ),
         "task": (
-            "Assign every filename exactly once to face or back of an order. "
+            ("Files are given as {id, filename}; in the answer use only the id. " if alias_map else "")
+            + "Assign every filename exactly once to face or back of an order. "
             "Use only supplied filenames and order IDs. If evidence is insufficient, "
             "return status=ambiguous. The filename convention is authoritative: "
             "for a numbered pair N_1/N_2 (also N-1/N-2 or names ending in a "
@@ -219,7 +272,7 @@ def request_side_proposal(
             "status": "proposal or ambiguous",
             "assignments": [{"order_id": "string", "face": "filename", "back": "filename"}],
             "confidence": "number from 0 to 1",
-            "reason": "short explanation in Russian",
+            "reason": "short explanation in English, ASCII only",
         },
     }
     try:
@@ -242,16 +295,17 @@ def request_side_proposal(
                 "max_tokens": 1200,
                 "stream": False,
                 **_reasoning_options(),
-                "response_format": _response_format(filenames, order_ids),
+                "response_format": _response_format(schema_names, order_ids),
             },
             timeout=request_timeout,
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:
         raise LocalLlmError(f"Ошибка обращения к LM Studio: {exc}") from exc
 
-    return _validate_proposal(_extract_json_content(payload), filenames, order_ids)
+    result = _restore_names(_extract_json_content(payload), alias_map)
+    return _validate_proposal(result, filenames, order_ids)
 
 
 def _visual_image(path: Path):
@@ -344,6 +398,7 @@ def request_vision_side_proposal(
         or "google/gemma-4-e4b"
     )
     request_timeout = timeout or int(os.getenv("LOCAL_LLM_TIMEOUT", "90"))
+    schema_names, alias_map = _grammar_names(shown_names)
 
     instruction = {
         "archive_name": archive_name,
@@ -367,7 +422,7 @@ def request_vision_side_proposal(
                 }
             ],
             "confidence": "number from 0 to 1",
-            "reason": "краткое объяснение на русском",
+            "reason": "short explanation in English, ASCII only",
         },
     }
     content: list[dict] = [
@@ -376,8 +431,9 @@ def request_vision_side_proposal(
             "text": json.dumps(instruction, ensure_ascii=False),
         }
     ]
-    for name, path in zip(shown_names, files):
-        content.append({"type": "text", "text": f"Файл: {name}"})
+    for index, (name, path) in enumerate(zip(shown_names, files)):
+        label = f"{schema_names[index]} ({name})" if alias_map else name
+        content.append({"type": "text", "text": f"Файл: {label}"})
         content.append(
             {
                 "type": "image_url",
@@ -405,17 +461,16 @@ def request_vision_side_proposal(
                 "max_tokens": 2000,
                 "stream": False,
                 **_reasoning_options(),
-                "response_format": _response_format(shown_names, order_ids),
+                "response_format": _response_format(schema_names, order_ids),
             },
             timeout=request_timeout,
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:
         raise LocalLlmError(
             f"Ошибка визуального обращения к LM Studio: {exc}"
         ) from exc
 
-    return _validate_proposal(
-        _extract_json_content(payload), shown_names, order_ids
-    )
+    result = _restore_names(_extract_json_content(payload), alias_map)
+    return _validate_proposal(result, shown_names, order_ids)
