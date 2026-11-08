@@ -424,7 +424,7 @@ class ApiCoreTests(unittest.TestCase):
             folder = root / "job_4-0_(1-12345)_face"
             self.assertTrue(summary.ok)
             self.assertTrue((folder / "job_4-0_(1-12345)_face_1.pdf").exists())
-            self.assertTrue((folder / ".source_archive" / archive_name).exists())
+            self.assertTrue((folder / archive_name).exists())
             self.assertFalse((root / archive_name).exists())
 
     @patch("api_core.unpack_archives")
@@ -595,6 +595,22 @@ class ApiCoreTests(unittest.TestCase):
             second_fetch.assert_not_called()
             fetch.assert_called_once()
 
+
+
+class ArchiveSourceLocationTests(unittest.TestCase):
+    def test_legacy_hidden_archive_moves_into_order_folder(self):
+        import tempfile
+        from api_core import _archive_source
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "order_4-0_(1-123)"
+            legacy = folder / ".source_archive"
+            legacy.mkdir(parents=True)
+            (legacy / "order_4-0_(1-123).zip").write_bytes(b"zip")
+            result = _archive_source(folder, root)
+            self.assertEqual(result, folder / "order_4-0_(1-123).zip")
+            self.assertTrue(result.exists())
+            self.assertFalse(legacy.exists())
 
 if __name__ == "__main__":
     unittest.main()

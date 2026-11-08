@@ -47,6 +47,22 @@ VISION_MAX_DIMENSION = 1600
 VISION_MAX_PIXELS = 50_000_000
 
 
+def _reasoning_options() -> dict[str, str]:
+    """Отключает «рассуждения» модели: вместе с JSON-схемой они дают пустой ответ.
+
+    Значение берётся из LOCAL_LLM_REASONING_EFFORT; пустая строка не передаёт
+    параметр вовсе (для моделей и серверов, которые его не принимают).
+    """
+    effort = os.getenv("LOCAL_LLM_REASONING_EFFORT", "none").strip()
+    return {"reasoning_effort": effort} if effort else {}
+
+
+def _auth_headers() -> dict[str, str]:
+    """Заголовок авторизации LM Studio, если задан LOCAL_LLM_API_TOKEN."""
+    token = os.getenv("LOCAL_LLM_API_TOKEN", "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def _response_format(filenames: list[str], order_ids: list[str]) -> dict:
     """Строгая схема ответа для поддерживаемого Ollama JSON mode."""
     generic_assignment = {
@@ -209,6 +225,7 @@ def request_side_proposal(
     try:
         response = requests.post(
             f"{server}/chat/completions",
+            headers=_auth_headers(),
             json={
                 "model": model_id,
                 "messages": [
@@ -224,6 +241,7 @@ def request_side_proposal(
                 "temperature": 0,
                 "max_tokens": 1200,
                 "stream": False,
+                **_reasoning_options(),
                 "response_format": _response_format(filenames, order_ids),
             },
             timeout=request_timeout,
@@ -370,6 +388,7 @@ def request_vision_side_proposal(
     try:
         response = requests.post(
             f"{server}/chat/completions",
+            headers=_auth_headers(),
             json={
                 "model": model_id,
                 "messages": [
@@ -385,6 +404,7 @@ def request_vision_side_proposal(
                 "temperature": 0,
                 "max_tokens": 2000,
                 "stream": False,
+                **_reasoning_options(),
                 "response_format": _response_format(shown_names, order_ids),
             },
             timeout=request_timeout,

@@ -421,16 +421,33 @@ def _unique_destination(directory: Path, filename: str) -> Path:
 
 
 def _archive_source(folder: Path, source_dir: Path) -> Path | None:
-    """Возвращает архив из папки заказа, мигрируя результат старого запуска."""
-    embedded_dir = folder / SOURCE_ARCHIVE_DIR
-    embedded = sorted(
-        (
-            path
-            for path in embedded_dir.iterdir()
-            if path.is_file() and path.suffix.casefold() in {".rar", ".zip", ".7z"}
-        ),
-        key=lambda path: path.name.casefold(),
-    ) if embedded_dir.is_dir() else []
+    """Возвращает исходный архив в папке заказа, при необходимости перенося его.
+
+    Архив хранится прямо в папке заказа. Архивы, сохранённые прежними версиями
+    в скрытой ``.source_archive/``, переносятся туда же.
+    """
+    extensions = {".rar", ".zip", ".7z"}
+
+    def own_archives(directory: Path) -> list[Path]:
+        if not directory.is_dir():
+            return []
+        return sorted(
+            (
+                path for path in directory.iterdir()
+                if path.is_file()
+                and path.suffix.casefold() in extensions
+                and path.stem.startswith(folder.name)
+            ),
+            key=lambda path: path.name.casefold(),
+        )
+
+    legacy_dir = folder / SOURCE_ARCHIVE_DIR
+    for legacy in own_archives(legacy_dir):
+        shutil.move(str(legacy), str(_unique_destination(folder, legacy.name)))
+    if legacy_dir.is_dir() and not any(legacy_dir.iterdir()):
+        legacy_dir.rmdir()
+
+    embedded = own_archives(folder)
     if len(embedded) > 1:
         raise ApiCoreError(
             f"В папке {folder.name} найдено несколько исходных архивов"
@@ -441,8 +458,7 @@ def _archive_source(folder: Path, source_dir: Path) -> Path | None:
     archive = _find_source_archive(source_dir, folder.name)
     if archive is None:
         return None
-    embedded_dir.mkdir(exist_ok=True)
-    destination = _unique_destination(embedded_dir, archive.name)
+    destination = _unique_destination(folder, archive.name)
     shutil.move(str(archive), str(destination))
     return destination
 

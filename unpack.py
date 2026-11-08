@@ -373,10 +373,12 @@ def _extract_zip_safely(zip_file: Path, extract_dir: Path):
 
 
 def _move_source_archive_into_order(archive_file: Path, extract_dir: Path) -> Path:
-    """Сохраняет исходный архив рядом с распакованными файлами заказа."""
-    archive_dir = extract_dir / SOURCE_ARCHIVE_DIR
-    archive_dir.mkdir(exist_ok=True)
-    destination = _unique_path(archive_dir, archive_file.name)
+    """Кладёт исходный архив прямо в папку заказа как резервную копию.
+
+    Архивы не являются форматами макетов, поэтому на подсчёт и
+    переименование файлов они не влияют.
+    """
+    destination = _unique_path(extract_dir, archive_file.name)
     shutil.move(str(archive_file), str(destination))
     return destination
 
@@ -511,8 +513,12 @@ def unpack_archives(source_dir: str, output_dir: str | None = None):
 
         # При ошибке — переносим в _TROUBLES_
         if error_reason:
-            troubles_dir = source_path / TROUBLES_DIR
-            troubles_dir.mkdir(exist_ok=True)
+            # Для каждого битого архива — своя папка: архив, частичная
+            # распаковка и _PROBLEM.txt лежат вместе для разбора.
+            troubles_root = source_path / TROUBLES_DIR
+            troubles_root.mkdir(exist_ok=True)
+            troubles_dir = _unique_path(troubles_root, archive_file.stem)
+            troubles_dir.mkdir()
 
             dest_archive = _unique_path(troubles_dir, archive_file.name)
             shutil.move(str(archive_file), str(dest_archive))
@@ -526,7 +532,7 @@ def unpack_archives(source_dir: str, output_dir: str | None = None):
                 shutil.move(str(temp_dir), str(partial_dir))
 
             # Файл с причиной ошибки
-            problem_file = troubles_dir / (archive_file.stem + "_PROBLEM.txt")
+            problem_file = troubles_dir / "_PROBLEM.txt"
             problem_file.write_text(
                 f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                 f"Архив: {archive_file.name}\n"
@@ -534,7 +540,7 @@ def unpack_archives(source_dir: str, output_dir: str | None = None):
                 f"Причина: {error_reason}\n",
                 encoding="utf-8",
             )
-            print(f"    📁 Архив перемещён в {TROUBLES_DIR}/")
+            print(f"    📁 Архив перемещён в {TROUBLES_DIR}/{troubles_dir.name}/")
 
 
 if __name__ == "__main__":

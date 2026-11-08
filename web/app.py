@@ -98,6 +98,10 @@ def create_app(service: WebPipelineService | None = None) -> FastAPI:
     def approve(run_id: str, order_id: str, payload: ApproveRequest):
         return call(app.state.service.approve, run_id, order_id, payload.names)
 
+    @app.post("/api/runs/{run_id}/approve-confident")
+    def approve_confident(run_id: str):
+        return call(app.state.service.approve_confident, run_id)
+
     @app.post("/api/runs/{run_id}/orders/{order_id}/postpone")
     def postpone(run_id: str, order_id: str):
         return call(app.state.service.postpone, run_id, order_id)

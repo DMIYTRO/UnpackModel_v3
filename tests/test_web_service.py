@@ -54,7 +54,7 @@ class WebPipelineServiceTests(unittest.TestCase):
             with (
                 patch("web.service.unpack_archives"),
                 patch("web.service.fetch_suborders", return_value=[]),
-                patch.object(service, "_mapping_with_optional_llm", return_value=(proposed, True, "")),
+                patch.object(service, "_mapping_with_optional_llm", return_value=(proposed, True, "", 0.95)),
             ):
                 created = service.start({"source_dir": str(root), "output_dir": str(root)})
                 run = self.wait_for_analysis(service, created["id"])
@@ -63,8 +63,23 @@ class WebPipelineServiceTests(unittest.TestCase):
             self.assertEqual(run["status"], "awaiting_decisions")
             self.assertEqual(order["status"], "awaiting_decision")
             self.assertEqual(order["proposal_source"], "llm")
+            self.assertEqual(order["review_group"], "confident")
             self.assertTrue(face.exists())
             self.assertTrue(back.exists())
+
+    def test_review_group_splits_confident_and_questionable(self):
+        group = WebPipelineService._review_group
+        items = [
+            {"proposal_available": True, "proposed_name": "a_face.tif"},
+            {"proposal_available": True, "proposed_name": "a_back.tif"},
+        ]
+        self.assertEqual(group("awaiting_decision", True, 0.95, items), "confident")
+        self.assertEqual(group("awaiting_decision", True, 0.5, items), "questions")
+        self.assertEqual(group("needs_attention", True, 0.99, items), "questions")
+        blank = [items[0], {"proposal_available": False, "proposed_name": ""}]
+        self.assertEqual(group("awaiting_decision", True, 0.99, blank), "questions")
+        dup = [items[0], dict(items[0])]
+        self.assertEqual(group("awaiting_decision", True, 0.99, dup), "questions")
 
     def test_partial_llm_plan_keeps_resolved_pair_and_leaves_failed_pair_blank(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -82,7 +97,7 @@ class WebPipelineServiceTests(unittest.TestCase):
                 patch("web.service.request_side_proposal", side_effect=[first, LocalLlmError("имена неясны")]),
                 patch("web.service.request_vision_side_proposal", side_effect=LocalLlmError("стороны не определены")),
             ):
-                operations, used_llm, warning = WebPipelineService._mapping_with_optional_llm(
+                operations, used_llm, warning, _confidence = WebPipelineService._mapping_with_optional_llm(
                     folder.resolve(),
                     [path.resolve() for path in files],
                     ["12345", "12346"],

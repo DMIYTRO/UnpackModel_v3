@@ -259,7 +259,7 @@ class ArchiveLimitTests(unittest.TestCase):
             ):
                 unpack_archives(str(root))
 
-            preserved = root / "order_4-0" / ".source_archive" / archive.name
+            preserved = root / "order_4-0" / archive.name
             self.assertTrue(preserved.exists())
             self.assertFalse(archive.exists())
 
@@ -272,8 +272,8 @@ class ArchiveLimitTests(unittest.TestCase):
 
             unpack_archives(str(root))
 
-            moved = root / "_TROUBLES_" / archive.name
-            problem = root / "_TROUBLES_" / "oversized_PROBLEM.txt"
+            moved = root / "_TROUBLES_" / "oversized" / archive.name
+            problem = root / "_TROUBLES_" / "oversized" / "_PROBLEM.txt"
             self.assertTrue(moved.exists())
             self.assertFalse(archive.exists())
             self.assertIn("превышает лимит 1,5 ГБ", problem.read_text(encoding="utf-8"))

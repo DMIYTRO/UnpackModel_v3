@@ -35,6 +35,9 @@ from website_parser import fetch_suborders
 FINAL_ORDER_STATUSES = {"completed", "manual_review", "cancelled"}
 
 
+CONFIDENT_THRESHOLD = float(os.environ.get("UNPACK_CONFIDENT_THRESHOLD", "0.85"))
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -150,6 +153,7 @@ class WebPipelineService:
         operations = []
         used_llm = False
         reason = ""
+        confidence = None
         status = "awaiting_decision"
         if not order_number:
             reason, status = "В имени папки не найден номер заказа", "needs_attention"
@@ -157,7 +161,7 @@ class WebPipelineService:
             try:
                 suborders = fetch_suborders(order_number)
                 order_ids = [order_number, *(item for item in suborders if item != order_number)]
-                operations, used_llm, llm_warning = self._mapping_with_optional_llm(
+                operations, used_llm, llm_warning, confidence = self._mapping_with_optional_llm(
                     folder,
                     files,
                     order_ids,
@@ -189,6 +193,8 @@ class WebPipelineService:
             "status": status,
             "reason": reason,
             "proposal_source": "llm" if used_llm else "rules",
+            "confidence": confidence,
+            "review_group": self._review_group(status, used_llm, confidence, items),
             "items": items,
             "created_at": _now(),
         }
@@ -202,6 +208,26 @@ class WebPipelineService:
                 self._event(run, "order.failed", f"{folder.name}: {order['reason']}", order_id=key)
         else:
             self._event(run, "order.waiting", f"{folder.name}: ожидает решения", order_id=key)
+
+    @staticmethod
+    def _review_group(
+        status: str, used_llm: bool, confidence: float | None, items: list[dict[str, Any]]
+    ) -> str:
+        """«confident» — предложение можно подтвердить пакетно, без просмотра.
+
+        Требуется: нет предупреждений, у каждого файла есть предложенное имя,
+        имена не повторяются, а уверенность LLM не ниже порога.
+        """
+        if status != "awaiting_decision" or not items:
+            return "questions"
+        if not all(item["proposal_available"] for item in items):
+            return "questions"
+        names = [item["proposed_name"].casefold() for item in items]
+        if len(set(names)) != len(names):
+            return "questions"
+        if used_llm and (confidence is None or confidence < CONFIDENT_THRESHOLD):
+            return "questions"
+        return "confident"
 
     def _apply_automatic_order(
         self,
@@ -252,7 +278,7 @@ class WebPipelineService:
         *,
         use_local_llm: bool,
         strict_order_ids: bool,
-    ) -> tuple[list[tuple[Path, Path]], bool, str]:
+    ) -> tuple[list[tuple[Path, Path]], bool, str, float | None]:
         proposal = None
         assignments = []
         confidences = []
@@ -274,7 +300,12 @@ class WebPipelineService:
                         for pair in operations
                         if str(pair[0].relative_to(folder)) not in unresolved_files
                     ]
-                return operations, proposal is not None, "; ".join(warnings)
+                return (
+                    operations,
+                    proposal is not None,
+                    "; ".join(warnings),
+                    proposal.confidence if proposal is not None else None,
+                )
             except AmbiguousSidesError as ambiguity:
                 if not use_local_llm:
                     raise ApiCoreError(
@@ -410,6 +441,30 @@ class WebPipelineService:
             self._event(run, "order.completed", f"Готово: {order['folder_name']}", order_id=order_id)
             self._finish_if_ready(run)
             return self.public_order(run_id, order)
+
+    def approve_confident(self, run_id: str) -> dict[str, Any]:
+        """Подтверждает все заказы группы «уверенные» с предложенными именами."""
+        with self._lock:
+            run = self.get(run_id)
+            targets = [
+                order["order_id"] for order in run["orders"].values()
+                if order.get("review_group") == "confident"
+                and order["status"] in {"awaiting_decision", "postponed"}
+            ]
+        approved, failed = [], []
+        for order_id in targets:
+            try:
+                self.approve(run_id, order_id, {})
+                approved.append(order_id)
+            except Exception as exc:
+                with self._lock:
+                    order = run["orders"][order_id]
+                    if order["status"] == "applying":
+                        order["status"] = "needs_attention"
+                    order["review_group"] = "questions"
+                    order["reason"] = f"Пакетное подтверждение не удалось: {exc}"
+                failed.append({"order_id": order_id, "error": str(exc)})
+        return {"approved": len(approved), "failed": failed}
 
     def postpone(self, run_id: str, order_id: str) -> dict[str, Any]:
         with self._lock:
