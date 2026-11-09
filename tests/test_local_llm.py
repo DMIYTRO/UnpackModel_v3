@@ -21,6 +21,20 @@ from local_llm import (
 )
 
 
+def _side_response(side, confidence, *, has_logo=False, has_contacts=False):
+    """Ответ модели на вопрос про одну сторону макета."""
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [{"message": {"content": json.dumps({
+            "has_logo_or_title": has_logo,
+            "has_contacts": has_contacts,
+            "side": side,
+            "confidence": confidence,
+        })}}]
+    }
+    return response
+
 class LocalLlmTests(unittest.TestCase):
     def test_pdf_first_page_is_converted_to_bounded_jpeg(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -39,22 +53,11 @@ class LocalLlmTests(unittest.TestCase):
     @patch("local_llm._image_data_url", return_value="data:image/jpeg;base64,AA==")
     @patch("local_llm.requests.post")
     def test_valid_vision_proposal_is_accepted(self, post, image_data):
-        response = Mock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": (
-                            '{"status":"proposal","assignments":['
-                            '{"order_id":"123","face":"a.tif","back":"b.tif"}],'
-                            '"confidence":0.95,"reason":"логотип и контакты"}'
-                        )
-                    }
-                }
-            ]
-        }
-        post.return_value = response
+        # Лицо — второй файл: модель не должна зависеть от порядка показа.
+        post.side_effect = [
+            _side_response("back", 0.9, has_contacts=True),
+            _side_response("face", 0.95, has_logo=True),
+        ]
 
         proposal = request_vision_side_proposal(
             "archive.zip",
@@ -62,26 +65,76 @@ class LocalLlmTests(unittest.TestCase):
             ["123"],
         )
 
-        self.assertEqual(proposal.assignments[0].face, "a.tif")
-        self.assertEqual(proposal.confidence, 0.95)
+        self.assertEqual(proposal.assignments[0].order_id, "123")
+        self.assertEqual(proposal.assignments[0].face, "b.tif")
+        self.assertEqual(proposal.assignments[0].back, "a.tif")
+        self.assertEqual(proposal.confidence, 0.9)
+        self.assertIn("a.tif: оборот", proposal.reason)
         self.assertEqual(image_data.call_count, 2)
-        user_content = post.call_args.kwargs["json"]["messages"][1]["content"]
-        self.assertEqual(
-            sum(item["type"] == "image_url" for item in user_content),
-            2,
-        )
-        response_format = post.call_args.kwargs["json"]["response_format"]
-        self.assertEqual(response_format["type"], "json_schema")
-        self.assertTrue(response_format["json_schema"]["strict"])
-        properties = response_format["json_schema"]["schema"]["properties"]
-        self.assertEqual(properties["assignments"]["minItems"], 1)
-        self.assertEqual(properties["assignments"]["maxItems"], 1)
-        alternatives = properties["assignments"]["items"]["oneOf"]
-        pairs = [
-            (item["properties"]["face"]["const"], item["properties"]["back"]["const"])
-            for item in alternatives
+        self.assertEqual(post.call_count, 2)
+        for call in post.call_args_list:
+            body = call.kwargs["json"]
+            user_content = body["messages"][1]["content"]
+            self.assertEqual(
+                sum(item["type"] == "image_url" for item in user_content), 1
+            )
+            response_format = body["response_format"]
+            self.assertEqual(response_format["type"], "json_schema")
+            self.assertTrue(response_format["json_schema"]["strict"])
+            side = response_format["json_schema"]["schema"]["properties"]["side"]
+            self.assertEqual(side["enum"], ["face", "back", "unknown"])
+
+    @patch("local_llm._image_data_url", return_value="data:image/jpeg;base64,AA==")
+    @patch("local_llm.requests.post")
+    def test_vision_rejects_pair_with_same_side(self, post, _image_data):
+        post.side_effect = [
+            _side_response("back", 0.95, has_contacts=True),
+            _side_response("back", 0.9, has_contacts=True),
         ]
-        self.assertEqual(pairs, [("a.tif", "b.tif"), ("b.tif", "a.tif")])
+
+        with self.assertRaisesRegex(LocalLlmError, "не различаются"):
+            request_vision_side_proposal(
+                "archive.zip",
+                [Path("/tmp/a.tif"), Path("/tmp/b.tif")],
+                ["123"],
+            )
+
+    @patch("local_llm._image_data_url", return_value="data:image/jpeg;base64,AA==")
+    @patch("local_llm.requests.post")
+    def test_vision_rejects_unknown_side(self, post, _image_data):
+        post.side_effect = [
+            _side_response("face", 0.95, has_logo=True),
+            _side_response("unknown", 0.3),
+        ]
+
+        with self.assertRaisesRegex(LocalLlmError, "неясно"):
+            request_vision_side_proposal(
+                "archive.zip",
+                [Path("/tmp/a.tif"), Path("/tmp/b.tif")],
+                ["123"],
+            )
+
+    @patch("local_llm._image_data_url", return_value="data:image/jpeg;base64,AA==")
+    @patch("local_llm.requests.post")
+    def test_vision_keeps_cyrillic_names_out_of_grammar(self, post, _image_data):
+        post.side_effect = [
+            _side_response("face", 0.9, has_logo=True),
+            _side_response("back", 0.9, has_contacts=True),
+        ]
+        names = ["візитка_лице.pdf", "візитка_зворот.pdf"]
+
+        proposal = request_vision_side_proposal(
+            "archive.zip",
+            [Path("/tmp/a.pdf"), Path("/tmp/b.pdf")],
+            ["123"],
+            filenames=names,
+        )
+
+        self.assertEqual(proposal.assignments[0].face, names[0])
+        self.assertEqual(proposal.assignments[0].back, names[1])
+        for call in post.call_args_list:
+            schema = json.dumps(call.kwargs["json"]["response_format"])
+            self.assertTrue(schema.isascii())
 
     @patch("local_llm.requests.post")
     def test_valid_proposal_is_accepted(self, post):
@@ -132,28 +185,16 @@ class LocalLlmTests(unittest.TestCase):
     @patch("local_llm._image_data_url", return_value="data:image/jpeg;base64,AA==")
     @patch("local_llm.requests.post")
     def test_vision_uses_dedicated_model_setting(self, post, _image_data):
-        response = Mock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": (
-                            '{"status":"proposal","assignments":['
-                            '{"order_id":"123","face":"a.tif","back":"b.tif"}],'
-                            '"confidence":0.95,"reason":"визуальные признаки"}'
-                        )
-                    }
-                }
-            ]
-        }
-        post.return_value = response
+        post.side_effect = [
+            _side_response("face", 0.95, has_logo=True),
+            _side_response("back", 0.95, has_contacts=True),
+        ]
 
         with patch.dict(
             "os.environ",
             {
                 "LOCAL_LLM_MODEL": "gemma4:e2b",
-                "LOCAL_LLM_VISION_MODEL": "moondream:latest",
+                "LOCAL_LLM_VISION_MODEL": "qwen2.5vl:3b",
             },
         ):
             request_vision_side_proposal(
@@ -162,7 +203,8 @@ class LocalLlmTests(unittest.TestCase):
                 ["123"],
             )
 
-        self.assertEqual(post.call_args.kwargs["json"]["model"], "moondream:latest")
+        for call in post.call_args_list:
+            self.assertEqual(call.kwargs["json"]["model"], "qwen2.5vl:3b")
 
     @patch("local_llm.requests.post")
     def test_invented_filename_is_rejected(self, post):

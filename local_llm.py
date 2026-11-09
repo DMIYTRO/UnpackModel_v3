@@ -366,6 +366,99 @@ def _image_data_url(path: Path) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
+VISION_SIDE_TASK = (
+    "Это одна сторона печатного макета (визитка, листовка, открытка). "
+    "Сначала ответь на вопросы: has_logo_or_title — есть ли крупный логотип, "
+    "название или главный заголовок; has_contacts — есть ли телефон, адрес, "
+    "e-mail, сайт, QR-код или мелкий справочный текст. Затем side: face (лицо) — "
+    "если главное на стороне логотип, название или крупный заголовок; back "
+    "(оборот) — если главное контакты и мелкий текст; unknown — если неясно. "
+    "confidence — уверенность от 0 до 1."
+)
+
+
+def _vision_side_format() -> dict:
+    """Схема ответа для одной стороны: без имён файлов, только ASCII-значения."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "single_side",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "has_logo_or_title": {"type": "boolean"},
+                    "has_contacts": {"type": "boolean"},
+                    "side": {"type": "string", "enum": ["face", "back", "unknown"]},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "required": ["has_logo_or_title", "has_contacts", "side", "confidence"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def _classify_single_side(
+    server: str, model_id: str, path: Path, name: str, timeout: int
+) -> tuple[str, float]:
+    """Спрашивает модель про одно изображение: лицо это или оборот."""
+    try:
+        response = requests.post(
+            f"{server}/chat/completions",
+            headers=_auth_headers(),
+            json={
+                "model": model_id,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты проверяешь стороны печатных макетов по изображениям. "
+                            "Верни только валидный JSON без Markdown."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": VISION_SIDE_TASK},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": _image_data_url(path)},
+                            },
+                        ],
+                    },
+                ],
+                "temperature": 0,
+                "max_tokens": 300,
+                "stream": False,
+                **_reasoning_options(),
+                "response_format": _vision_side_format(),
+            },
+            timeout=timeout,
+        )
+        _raise_for_status(response)
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise LocalLlmError(
+            f"Ошибка визуального обращения к LM Studio ({name}): {exc}"
+        ) from exc
+
+    result = _extract_json_content(payload)
+    side = result.get("side")
+    if side not in ("face", "back", "unknown"):
+        raise LocalLlmError(f"Модель вернула неизвестную сторону для {name}: {side!r}")
+    try:
+        confidence = float(result.get("confidence"))
+    except (TypeError, ValueError) as exc:
+        raise LocalLlmError(f"Модель не вернула числовую уверенность для {name}") from exc
+    if not 0 <= confidence <= 1:
+        raise LocalLlmError(f"Уверенность модели для {name} должна быть от 0 до 1")
+    return side, confidence
+
+
+SIDE_LABELS = {"face": "лицо", "back": "оборот", "unknown": "неясно"}
+
+
 def request_vision_side_proposal(
     archive_name: str,
     files: list[Path],
@@ -376,7 +469,14 @@ def request_vision_side_proposal(
     model: str | None = None,
     timeout: int | None = None,
 ) -> LlmProposal:
-    """Третий слой: определяет стороны по уменьшенным изображениям макетов."""
+    """Третий слой: определяет стороны по уменьшенным изображениям макетов.
+
+    Каждое изображение проверяется отдельным запросом: маленькие визуальные
+    модели (qwen2.5vl:3b и т.п.) путают файлы, если показать им пару сразу, —
+    дают верное объяснение, но меняют имена местами. Пара принимается, только
+    если одна сторона получилась лицом, а другая оборотом; иначе — отказ, и
+    заказ уходит оператору.
+    """
     if len(files) != len(filenames or files):
         raise LocalLlmError("Число файлов и отображаемых имён не совпадает")
     shown_names = filenames or [path.name for path in files]
@@ -398,79 +498,30 @@ def request_vision_side_proposal(
         or "google/gemma-4-e4b"
     )
     request_timeout = timeout or int(os.getenv("LOCAL_LLM_TIMEOUT", "90"))
-    schema_names, alias_map = _grammar_names(shown_names)
 
-    instruction = {
-        "archive_name": archive_name,
-        "order_id": order_ids[0],
-        "task": (
-            "Определи лицо и оборот печатного макета по содержимому изображений. "
-            "Сначала учитывай явное правило имён: суффикс _1, -1 или отдельная "
-            "цифра 1 в конце означает лицо; _2, -2 или отдельная цифра 2 в конце "
-            "означает оборот. "
-            "Логотип/главная идентификация обычно являются лицом; адрес, телефон, "
-            "QR-код и подробные контакты обычно являются оборотом. Используй только "
-            "указанные имена. Если содержимого недостаточно, верни status=ambiguous."
-        ),
-        "response_schema": {
-            "status": "proposal or ambiguous",
-            "assignments": [
-                {
-                    "order_id": order_ids[0],
-                    "face": "точное имя файла",
-                    "back": "точное имя файла",
-                }
-            ],
-            "confidence": "number from 0 to 1",
-            "reason": "short explanation in English, ASCII only",
-        },
-    }
-    content: list[dict] = [
-        {
-            "type": "text",
-            "text": json.dumps(instruction, ensure_ascii=False),
-        }
+    verdicts = [
+        _classify_single_side(server, model_id, path, name, request_timeout)
+        for path, name in zip(files, shown_names)
     ]
-    for index, (name, path) in enumerate(zip(shown_names, files)):
-        label = f"{schema_names[index]} ({name})" if alias_map else name
-        content.append({"type": "text", "text": f"Файл: {label}"})
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": _image_data_url(path)},
-            }
-        )
-
-    try:
-        response = requests.post(
-            f"{server}/chat/completions",
-            headers=_auth_headers(),
-            json={
-                "model": model_id,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Ты проверяешь стороны печатных макетов по изображениям. "
-                            "Верни только валидный JSON без Markdown."
-                        ),
-                    },
-                    {"role": "user", "content": content},
-                ],
-                "temperature": 0,
-                "max_tokens": 2000,
-                "stream": False,
-                **_reasoning_options(),
-                "response_format": _response_format(schema_names, order_ids),
-            },
-            timeout=request_timeout,
-        )
-        _raise_for_status(response)
-        payload = response.json()
-    except (requests.RequestException, ValueError) as exc:
+    summary = ", ".join(
+        f"{name}: {SIDE_LABELS[side]} ({confidence:.0%})"
+        for name, (side, confidence) in zip(shown_names, verdicts)
+    )
+    sides = [side for side, _ in verdicts]
+    if sorted(sides) != ["back", "face"]:
         raise LocalLlmError(
-            f"Ошибка визуального обращения к LM Studio: {exc}"
-        ) from exc
+            f"По изображениям стороны не различаются однозначно — {summary}"
+        )
 
-    result = _restore_names(_extract_json_content(payload), alias_map)
-    return _validate_proposal(result, shown_names, order_ids)
+    face_index = sides.index("face")
+    return LlmProposal(
+        assignments=(
+            SideAssignment(
+                order_id=order_ids[0],
+                face=shown_names[face_index],
+                back=shown_names[1 - face_index],
+            ),
+        ),
+        confidence=min(confidence for _, confidence in verdicts),
+        reason=f"Визуальная проверка по одному изображению: {summary}",
+    )
